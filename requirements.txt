@@ -1,0 +1,5 @@
+fastmcp
+beautifulsoup4
+playwright
+cloudscraper
+lxml
