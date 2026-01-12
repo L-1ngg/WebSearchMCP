@@ -2,6 +2,8 @@
 
 一个基于 MCP (Model Context Protocol) 的网页搜索服务器，支持 Brave 搜索和网页抓取功能。
 
+> **推荐**: 本 MCP 服务器非常适合与 [CherryStudio](https://github.com/kangfenmao/cherry-studio) 配合使用，提供稳定的网页搜索和抓取能力。
+
 ## 功能
 
 - **web_search**: 使用 Brave 搜索引擎进行网页搜索
@@ -78,6 +80,20 @@ python WebSearchMCP.py
 python WebSearchMCP.py --proxy http://127.0.0.1:7890
 ```
 
+### 使用 Cloudflare Worker 代理
+
+通过 Cloudflare Worker 转发请求，目标网站看到的 IP 为 Cloudflare 节点 IP：
+
+```bash
+python WebSearchMCP.py --cf-worker https://your-worker.workers.dev
+```
+
+可以同时使用本地代理和 CF Worker（本地代理用于连接 CF Worker）：
+
+```bash
+python WebSearchMCP.py --proxy http://127.0.0.1:7890 --cf-worker https://your-worker.workers.dev
+```
+
 ### 配置 CherryStudio
 
 在 CherryStudio 的 MCP 服务器设置中添加：
@@ -105,6 +121,45 @@ python WebSearchMCP.py --proxy http://127.0.0.1:7890
   }
 }
 ```
+
+如需使用 Cloudflare Worker 代理：
+
+```json
+{
+  "mcpServers": {
+    "web-search": {
+      "command": "python",
+      "args": ["/完整路径/WebSearchMCP.py", "--cf-worker", "https://your-worker.workers.dev"]
+    }
+  }
+}
+```
+
+同时使用本地代理和 CF Worker：
+
+```json
+{
+  "mcpServers": {
+    "web-search": {
+      "command": "python",
+      "args": [
+        "/完整路径/WebSearchMCP.py",
+        "--proxy", "http://127.0.0.1:7890",
+        "--cf-worker", "https://your-worker.workers.dev"
+      ]
+    }
+  }
+}
+```
+
+## 命令行参数
+
+| 参数 | 说明 | 示例 |
+|------|------|------|
+| `--proxy` | 本地代理地址 | `--proxy http://127.0.0.1:7890` |
+| `--cf-worker` | Cloudflare Worker 地址 | `--cf-worker https://xxx.workers.dev` |
+
+> **注意**: 本工具兼容 CherryStudio 等 MCP 客户端可能将 `--arg value` 合并为单个字符串的情况。
 
 ## 工具说明
 
@@ -145,9 +200,11 @@ python WebSearchMCP.py --proxy http://127.0.0.1:7890
 ## 特性
 
 - 持久化浏览器实例，提升搜索性能
-- 支持代理配置
+- 支持本地代理配置 (`--proxy`)
+- 支持 Cloudflare Worker 代理 (`--cf-worker`)，隐藏真实 IP
 - 自动内容截断，防止响应过大
 - 使用 cloudscraper 绕过基础反爬
+- 兼容 CherryStudio 等 MCP 客户端的参数传递方式
 
 ## 常见问题
 
