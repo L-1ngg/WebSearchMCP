@@ -9,10 +9,15 @@ curl_cffi 版本（无 Playwright / cloudscraper）：
 import argparse
 import asyncio
 import logging
+import os
 import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote, quote_plus
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests as curl_requests
@@ -35,51 +40,51 @@ parser = argparse.ArgumentParser(description="Web Search MCP Server (curl_cffi)"
 parser.add_argument(
     "--proxy",
     type=str,
-    default=None,
+    default=os.getenv("PROXY"),
     help="本地代理设置，例如: http://127.0.0.1:7890",
 )
 parser.add_argument(
     "--cf-worker",
     type=str,
-    default=None,
+    default=os.getenv("CF_WORKER"),
     help="Cloudflare Worker 地址，例如: https://xxx.xxx.workers.dev",
 )
 parser.add_argument(
     "--timeout",
     type=int,
-    default=60,
+    default=int(os.getenv("TIMEOUT", "60")),
     help="请求超时时间（秒），默认 60",
 )
 parser.add_argument(
     "--transport",
     type=str,
-    default="sse",
+    default=os.getenv("TRANSPORT", "sse"),
     choices=["stdio", "sse", "streamable-http"],
     help="MCP 传输方式：stdio / sse / streamable-http（默认 sse，便于 CherryStudio 连接）",
 )
 parser.add_argument(
     "--host",
     type=str,
-    default="127.0.0.1",
+    default=os.getenv("HOST", "127.0.0.1"),
     help="SSE/HTTP 监听地址（默认 127.0.0.1）",
 )
 parser.add_argument(
     "--port",
     type=int,
-    default=8000,
+    default=int(os.getenv("PORT", "8000")),
     help="SSE/HTTP 监听端口（默认 8000）",
 )
 parser.add_argument(
     "--log-level",
     type=str,
-    default="INFO",
+    default=os.getenv("LOG_LEVEL", "INFO"),
     choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
     help="日志级别（默认 INFO）",
 )
 parser.add_argument(
     "--http-version",
     type=str,
-    default="v1",
+    default=os.getenv("HTTP_VERSION", "v1"),
     choices=["v1", "v2", "v2tls", "v2_prior_knowledge", "v3", "v3only"],
     help="HTTP 协议版本（默认 v1，代理/Worker 场景更稳）",
 )

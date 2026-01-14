@@ -12,6 +12,7 @@ SOTA Search MCP Server - AI 增强搜索
 """
 
 import argparse
+import os
 import asyncio
 import json
 import logging
@@ -19,6 +20,9 @@ import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, quote
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests as curl_requests
@@ -42,31 +46,31 @@ parser = argparse.ArgumentParser(description="SOTA Search MCP Server")
 parser.add_argument(
     "--proxy",
     type=str,
-    default=None,
+    default=os.getenv("PROXY"),
     help="本地代理设置，例如: http://127.0.0.1:7890",
 )
 parser.add_argument(
     "--cf-worker",
     type=str,
-    default=None,
+    default=os.getenv("CF_WORKER"),
     help="Cloudflare Worker 地址，例如: https://xxx.xxx.workers.dev",
 )
 parser.add_argument(
     "--openai-api-key",
     type=str,
-    default=None,
+    default=os.getenv("OPENAI_API_KEY"),
     help="OpenAI API Key",
 )
 parser.add_argument(
     "--openai-base-url",
     type=str,
-    default=None,
+    default=os.getenv("OPENAI_BASE_URL"),
     help="OpenAI API Base URL，例如: https://api.openai.com/v1",
 )
 parser.add_argument(
     "--openai-model",
     type=str,
-    default="gpt-4o",
+    default=os.getenv("OPENAI_MODEL", "gpt-4o"),
     help="OpenAI 模型名称，默认: gpt-4o",
 )
 
