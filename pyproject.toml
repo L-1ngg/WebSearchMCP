@@ -10,5 +10,6 @@ dependencies = [
   "fastmcp",
   "lxml",
   "openai",
+  "python-dotenv",
   "uvicorn",
 ]

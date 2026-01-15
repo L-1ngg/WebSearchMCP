@@ -1,15 +1,17 @@
-# Web Search MCP Server
+#  WebSearch MCP Server
 
-一个基于 MCP (Model Context Protocol) 的网页搜索服务器，支持 Brave 搜索和网页抓取功能。
+一个基于 MCP (Model Context Protocol) 的智能网页搜索服务器，支持 AI 增强搜索、Brave 搜索和网页抓取功能。
 
-> **推荐**: 本 MCP 服务器非常适合与 [CherryStudio](https://github.com/kangfenmao/cherry-studio) 配合使用，提供稳定的网页搜索和抓取能力。
+> **推荐**: 本项目推荐使用 `SOTASearch.py`，它结合了 AI 深度搜索和 Brave 搜索，**并行执行**两种搜索以提升速度。适合与 [CherryStudio](https://github.com/kangfenmao/cherry-studio) 配合使用。
 
 ## 功能
 
-- **web_search**: 使用 Brave 搜索引擎进行网页搜索
-- **fetch_html**: 抓取网页 HTML 内容
-- **fetch_text**: 抓取网页并提取纯文本
-- **fetch_metadata**: 抓取网页元数据（标题、描述、链接）
+| 工具 | 说明 |
+|------|------|
+| `web_search` | AI 深度搜索 + Brave 搜索（并行执行），返回链接列表和 AI 总结 |
+| `fetch_html` | 抓取网页 HTML 内容 |
+| `fetch_text` | 抓取网页并提取纯文本 |
+| `fetch_metadata` | 抓取网页元数据（标题、描述、链接） |
 
 ## 安装
 
@@ -20,145 +22,88 @@ git clone https://github.com/yourusername/WebSearchMCP.git
 cd WebSearchMCP
 ```
 
-### 2. 使用 uv（推荐）
+### 2. 安装依赖
+
+**使用 uv（推荐）：**
 
 ```bash
-# 安装依赖（自动创建 .venv）
 uv sync
 ```
 
-运行示例：
-
-```bash
-uv run WebSearchMCP.py
-uv run SOTASearch.py --openai-api-key "your-api-key" --openai-base-url "https://api.openai.com/v1"
-```
-
-### 3. 创建虚拟环境（pip 方式，可选）
-
-```bash
-# 创建虚拟环境
-python -m venv venv
-
-# 激活虚拟环境
-# macOS/Linux:
-source venv/bin/activate
-# Windows:
-venv\Scripts\activate
-```
-
-### 4. 安装 Python 依赖
+**使用 pip：**
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 5. 验证安装
+### 3. 配置环境变量
+
+复制 `.env.example` 为 `.env` 并填入配置：
 
 ```bash
-python WebSearchMCP.py
+cp .env.example .env
 ```
 
-如果看到 `Web Search MCP Server 启动中...` 说明安装成功。
+主要配置项：
 
-## 使用
+```env
+# 代理配置（可选）
+PROXY=http://127.0.0.1:7890
+CF_WORKER=https://your-worker.workers.dev
 
-### 直接运行
+# OpenAI API 配置（SOTASearch 必需）
+OPENAI_API_KEY=sk-xxx
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o
+```
+
+## 快速开始
 
 ```bash
-python WebSearchMCP.py
+# 使用 uv（推荐）
+uv run SOTASearch.py
+
+# 或使用 python
+python SOTASearch.py
 ```
 
-### 使用代理
+## 配置 CherryStudio
 
-```bash
-python WebSearchMCP.py --proxy http://127.0.0.1:7890
-```
+在 CherryStudio 的 MCP 服务器设置中添加（必须使用虚拟环境中的 Python 绝对路径）：
 
-### 使用 Cloudflare Worker 代理
-
-通过 Cloudflare Worker 转发请求，目标网站看到的 IP 为 Cloudflare 节点 IP：
-
-```bash
-python WebSearchMCP.py --cf-worker https://your-worker.workers.dev
-```
-
-可以同时使用本地代理和 CF Worker（本地代理用于连接 CF Worker）：
-
-```bash
-python WebSearchMCP.py --proxy http://127.0.0.1:7890 --cf-worker https://your-worker.workers.dev
-```
-
-### 配置 CherryStudio
-
-在 CherryStudio 的 MCP 服务器设置中添加：
+**Windows 示例：**
 
 ```json
 {
   "mcpServers": {
-    "web-search": {
-      "command": "python",
-      "args": ["/完整路径/WebSearchMCP.py"]
+    "sota-search": {
+      "name": "Websearch",
+      "type": "stdio",
+      "command": "D:\\Code\\github\\WebSearchMCP\\.venv\\Scripts\\python.exe",
+      "args": ["D:/Code/github/WebSearchMCP/SOTASearch.py"]
     }
   }
 }
 ```
 
-如果你用 uv 管理依赖，推荐这样配（更稳定，不依赖系统 python 环境）：
+**macOS/Linux 示例：**
 
 ```json
 {
   "mcpServers": {
-    "web-search": {
-      "command": "uv",
-      "args": ["run", "--project", "/完整路径/WebSearchMCP", "WebSearchMCP.py"]
+    "sota-search": {
+      "name": "Websearch",
+      "type": "stdio",
+      "command": "/path/to/WebSearchMCP/.venv/bin/python",
+      "args": ["/path/to/WebSearchMCP/SOTASearch.py"]
     }
   }
 }
 ```
 
-如需使用代理：
+> **注意**: 推荐使用项目虚拟环境中的 Python 解释器（`.venv/Scripts/python.exe` 或 `.venv/bin/python`），确保依赖正确加载。系统 Python 也可以使用，但需确保已安装所有依赖。
 
-```json
-{
-  "mcpServers": {
-    "web-search": {
-      "command": "python",
-      "args": ["/完整路径/WebSearchMCP.py", "--proxy", "http://127.0.0.1:7890"]
-    }
-  }
-}
-```
-
-如需使用 Cloudflare Worker 代理：
-
-```json
-{
-  "mcpServers": {
-    "web-search": {
-      "command": "python",
-      "args": ["/完整路径/WebSearchMCP.py", "--cf-worker", "https://your-worker.workers.dev"]
-    }
-  }
-}
-```
-
-同时使用本地代理和 CF Worker：
-
-```json
-{
-  "mcpServers": {
-    "web-search": {
-      "command": "python",
-      "args": [
-        "/完整路径/WebSearchMCP.py",
-        "--proxy", "http://127.0.0.1:7890",
-        "--cf-worker", "https://your-worker.workers.dev"
-      ]
-    }
-  }
-}
-```
+> **提示**: 代理和 API 配置建议写在 `.env` 文件中，无需在命令行参数中指定。
 
 ## 命令行参数
 
@@ -166,18 +111,32 @@ python WebSearchMCP.py --proxy http://127.0.0.1:7890 --cf-worker https://your-wo
 |------|------|------|
 | `--proxy` | 本地代理地址 | `--proxy http://127.0.0.1:7890` |
 | `--cf-worker` | Cloudflare Worker 地址 | `--cf-worker https://xxx.workers.dev` |
-
-> **注意**: 本工具兼容 CherryStudio 等 MCP 客户端可能将 `--arg value` 合并为单个字符串的情况。
+| `--openai-api-key` | OpenAI API Key | `--openai-api-key sk-xxx` |
+| `--openai-base-url` | OpenAI API Base URL | `--openai-base-url https://api.openai.com/v1` |
+| `--openai-model` | 模型名称（默认 gpt-4o） | `--openai-model gpt-4o` |
 
 ## 工具说明
 
 ### web_search
 
-使用 Brave 搜索引擎搜索网页。
+AI 深度搜索 + Brave 搜索（并行执行）。
 
 参数：
 - `query`: 搜索关键词（必填）
 - `max_results`: 返回的最大结果数，默认 10
+
+返回格式：
+
+```json
+{
+  "success": true,
+  "query": "搜索关键词",
+  "links": [
+    {"title": "标题", "url": "链接", "description": "描述"}
+  ],
+  "ai_summary": "AI 总结内容"
+}
+```
 
 ### fetch_html
 
@@ -207,21 +166,11 @@ python WebSearchMCP.py --proxy http://127.0.0.1:7890 --cf-worker https://your-wo
 
 ## 特性
 
-- 支持本地代理配置 (`--proxy`)
-- 支持 Cloudflare Worker 代理 (`--cf-worker`)，隐藏真实 IP
+- AI 深度搜索 + Brave 搜索**并行执行**
+- 支持本地代理 (`--proxy`)
+- 支持 Cloudflare Worker 代理 (`--cf-worker`)
 - 自动内容截断，防止响应过大
-- 兼容 CherryStudio 等 MCP 客户端的参数传递方式
-- 默认 SSE 便于 CherryStudio 连接
-
-## 常见问题
-
-### 代理连接失败
-
-确保代理服务正在运行，并且端口正确。
-
-### 搜索超时
-
-可能是网络问题或 Brave 搜索页面结构变化，检查网络连接或更新选择器。
+- 支持 `.env` 文件配置
 
 ## 依赖
 
@@ -229,85 +178,5 @@ python WebSearchMCP.py --proxy http://127.0.0.1:7890 --cf-worker https://your-wo
 - fastmcp
 - beautifulsoup4
 - curl_cffi
-- uvicorn（SSE）
 - lxml
-- openai (SOTASearch)
-
----
-
-## SOTASearch - AI 增强搜索
-
-SOTASearch 是 WebSearchMCP 的增强版本，结合了 AI 深度搜索和普通搜索功能。
-
-### 功能
-
-- **AI 搜索**: 使用 OpenAI API 进行智能搜索，返回搜索链接和总结内容
-- **普通搜索**: 保留原有的 Brave Search 功能（走 CF Worker）
-- 两种搜索结果会同时返回
-
-### 使用方法
-
-#### 直接运行
-
-```bash
-python SOTASearch.py \
-  --openai-api-key "your-api-key" \
-  --openai-base-url "https://api.openai.com/v1" \
-  --openai-model "gpt-4o"
-```
-
-#### 配合代理和 CF Worker
-
-```bash
-python SOTASearch.py \
-  --proxy http://127.0.0.1:7890 \
-  --cf-worker https://your-worker.workers.dev \
-  --openai-api-key "your-api-key" \
-  --openai-base-url "https://api.openai.com/v1" \
-  --openai-model "gpt-4o"
-```
-
-### 配置 CherryStudio
-
-```json
-{
-  "mcpServers": {
-    "sota-search": {
-      "command": "python",
-      "args": [
-        "/完整路径/SOTASearch.py",
-        "--proxy", "http://127.0.0.1:7890",
-        "--cf-worker", "https://your-worker.workers.dev",
-        "--openai-api-key", "your-api-key",
-        "--openai-base-url", "https://api.openai.com/v1",
-        "--openai-model", "gpt-4o"
-      ]
-    }
-  }
-}
-```
-
-### 命令行参数
-
-| 参数 | 说明 | 示例 |
-|------|------|------|
-| `--proxy` | 本地代理地址 | `--proxy http://127.0.0.1:7890` |
-| `--cf-worker` | Cloudflare Worker 地址 | `--cf-worker https://xxx.workers.dev` |
-| `--openai-api-key` | OpenAI API Key | `--openai-api-key sk-xxx` |
-| `--openai-base-url` | OpenAI API Base URL | `--openai-base-url https://api.openai.com/v1` |
-| `--openai-model` | OpenAI 模型名称（默认 gpt-4o） | `--openai-model gpt-4o` |
-
-### 返回格式
-
-`web_search` 工具返回包含两部分：
-
-```json
-{
-  "success": true,
-  "query": "搜索关键词",
-  "ai_search": "AI 搜索返回的总结内容和链接",
-  "basic_search": [
-    {"title": "标题", "url": "链接", "description": "描述"}
-  ]
-}
-```
+- openai

@@ -23,3 +23,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Environment
+.env
+
+# else
+.claude

@@ -6,19 +6,23 @@ SOTA Search MCP Server - AI 增强搜索
 - 新增 ai_search: 使用 OpenAI API 进行 AI 深度搜索，返回搜索链接和总结
 - 支持 --cf-worker 参数，通过 Cloudflare Worker 代理流量
 
-变更（curl_cffi 版）：
+变更(curl_cffi 版）：
 - 移除 Playwright / cloudscraper
 - 统一使用 curl_cffi 发起 HTTP 请求并解析 HTML
 """
 
 import argparse
 import asyncio
-import json
 import logging
+import os
 import re
 import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, quote
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests as curl_requests
@@ -42,31 +46,31 @@ parser = argparse.ArgumentParser(description="SOTA Search MCP Server")
 parser.add_argument(
     "--proxy",
     type=str,
-    default=None,
+    default=os.getenv("PROXY"),
     help="本地代理设置，例如: http://127.0.0.1:7890",
 )
 parser.add_argument(
     "--cf-worker",
     type=str,
-    default=None,
+    default=os.getenv("CF_WORKER"),
     help="Cloudflare Worker 地址，例如: https://xxx.xxx.workers.dev",
 )
 parser.add_argument(
     "--openai-api-key",
     type=str,
-    default=None,
+    default=os.getenv("OPENAI_API_KEY"),
     help="OpenAI API Key",
 )
 parser.add_argument(
     "--openai-base-url",
     type=str,
-    default=None,
+    default=os.getenv("OPENAI_BASE_URL"),
     help="OpenAI API Base URL，例如: https://api.openai.com/v1",
 )
 parser.add_argument(
     "--openai-model",
     type=str,
-    default="gpt-4o",
+    default=os.getenv("OPENAI_MODEL", "gpt-4o"),
     help="OpenAI 模型名称，默认: gpt-4o",
 )
 
@@ -109,6 +113,20 @@ CURL_IMPERSONATE = "chrome110"
 HTTP_VERSION = "v1"
 FETCH_TIMEOUT_S = 15
 SEARCH_TIMEOUT_S = 60
+
+# OpenAI 客户端（懒加载，只创建一次）
+_openai_client: Optional[OpenAI] = None
+
+
+def _get_openai_client() -> Optional[OpenAI]:
+    """获取 OpenAI 客户端（懒加载）"""
+    global _openai_client
+    if _openai_client is None and OPENAI_API_KEY and OPENAI_BASE_URL:
+        _openai_client = OpenAI(
+            api_key=OPENAI_API_KEY,
+            base_url=OPENAI_BASE_URL,
+        )
+    return _openai_client
 
 
 # ============================================================================
@@ -321,7 +339,7 @@ async def _search_brave_core(
                 )
             return extracted
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _fetch_and_parse)
     except Exception as e:
         logger.error(f"搜索过程发生错误: {e}")
@@ -375,9 +393,7 @@ def _curl_get_with_retries(
                 raise
             timeout_s = max(timeout_s * 2, timeout_s + 10)
             # 简单退避
-            import time as _time
-
-            _time.sleep(0.3 * attempt)
+            time.sleep(0.3 * attempt)
     assert last_error is not None
     raise last_error
 
@@ -407,7 +423,7 @@ async def fetch_html(url: str, *, headers: Optional[Dict[str, str]] = None) -> D
                 "truncated": was_truncated,
             }
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, _fetch)
         return result
     except Exception as e:
@@ -442,7 +458,7 @@ async def fetch_text(url: str, *, headers: Optional[Dict[str, str]] = None) -> D
                 "truncated": was_truncated,
             }
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, _fetch)
         return result
     except Exception as e:
@@ -495,7 +511,7 @@ async def fetch_metadata(url: str, *, headers: Optional[Dict[str, str]] = None) 
                 "truncated": was_truncated,
             }
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, _fetch)
         return result
     except Exception as e:
@@ -513,16 +529,15 @@ async def web_search(query: str, max_results: int = 10) -> Dict[str, Any]:
     all_links = []
     ai_summary = ""
 
-    # 1. AI 搜索（走代理）
-    if OPENAI_API_KEY and OPENAI_BASE_URL:
-        try:
-            def _ai_search():
-                client = OpenAI(
-                    api_key=OPENAI_API_KEY,
-                    base_url=OPENAI_BASE_URL,
-                )
+    # 定义 AI 搜索的异步包装函数
+    async def _ai_search_async() -> Tuple[List[Dict[str, str]], str]:
+        if not (OPENAI_API_KEY and OPENAI_BASE_URL):
+            return [], ""
 
-                prompt = f"""你是一个专业的搜索助手。请针对用户的问题进行深度搜索和分析。
+        def _ai_search():
+            client = _get_openai_client()
+
+            prompt = f"""你是一个专业的搜索助手。请针对用户的问题进行深度搜索和分析。
 
 要求：
 1. 尽可能多地搜索相关信息，从多个角度和来源获取数据
@@ -538,31 +553,42 @@ async def web_search(query: str, max_results: int = 10) -> Dict[str, Any]:
 
 请开始搜索并提供详细回答。"""
 
-                response = client.chat.completions.create(
-                    model=OPENAI_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                return response.choices[0].message.content
+            response = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.choices[0].message.content
 
-            loop = asyncio.get_event_loop()
-            ai_content = await loop.run_in_executor(None, _ai_search)
+        loop = asyncio.get_running_loop()
+        ai_content = await loop.run_in_executor(None, _ai_search)
+        ai_links, summary = _parse_markdown_links(ai_content)
+        logger.info(f"AI 搜索完成，提取到 {len(ai_links)} 个链接")
+        return ai_links, summary
 
-            # 解析 AI 返回的链接和总结
-            ai_links, ai_summary = _parse_markdown_links(ai_content)
-            all_links.extend(ai_links)
-            logger.info(f"AI 搜索完成，提取到 {len(ai_links)} 个链接")
+    # 定义普通搜索的异步包装函数
+    async def _brave_search_async() -> List[Dict[str, str]]:
+        results = await _search_brave_core(query=query, max_results=max_results)
+        logger.info(f"普通搜索完成，获取到 {len(results)} 个结果")
+        return results
 
-        except Exception as e:
-            logger.error(f"AI 搜索失败: {e}")
-            ai_summary = f"AI 搜索失败: {str(e)}"
+    # 并行执行两个搜索
+    ai_task = asyncio.create_task(_ai_search_async())
+    brave_task = asyncio.create_task(_brave_search_async())
+    results = await asyncio.gather(ai_task, brave_task, return_exceptions=True)
 
-    # 2. 普通搜索（走 CF Worker）
-    try:
-        basic_results = await _search_brave_core(query=query, max_results=max_results)
-        all_links.extend(basic_results)
-        logger.info(f"普通搜索完成，获取到 {len(basic_results)} 个结果")
-    except Exception as e:
-        logger.error(f"普通搜索失败: {e}")
+    # 处理 AI 搜索结果
+    if isinstance(results[0], Exception):
+        logger.error(f"AI 搜索失败: {results[0]}")
+        ai_summary = f"AI 搜索失败: {str(results[0])}"
+    else:
+        ai_links, ai_summary = results[0]
+        all_links.extend(ai_links)
+
+    # 处理普通搜索结果
+    if isinstance(results[1], Exception):
+        logger.error(f"普通搜索失败: {results[1]}")
+    else:
+        all_links.extend(results[1])
 
     # 去重（按 URL）
     seen_urls = set()

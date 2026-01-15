@@ -4,3 +4,4 @@ lxml
 openai
 curl_cffi
 uvicorn
+python-dotenv

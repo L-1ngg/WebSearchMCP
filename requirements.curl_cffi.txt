@@ -1,5 +1,0 @@
-fastmcp
-beautifulsoup4
-lxml
-curl_cffi
-uvicorn
