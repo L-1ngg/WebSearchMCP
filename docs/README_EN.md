@@ -17,6 +17,22 @@ English | [简体中文](../README.md)
 
 Grok Search MCP is an MCP server built on [FastMCP](https://github.com/jlowin/fastmcp), featuring a **dual-engine architecture**: **Grok** handles AI-driven intelligent search, while **Tavily** handles high-fidelity web content extraction and site mapping. Together they provide complete real-time web access for LLM clients such as Claude Code and Cherry Studio.
 
+## Project Origin
+
+This repository is based on [GuDaStudio/GrokSearch](https://github.com/GuDaStudio/GrokSearch), while preserving the original MIT License and copyright notice.
+
+This fork includes secondary development around local `.env` configuration and multiple Tavily API key rotation. New features and ongoing maintenance are handled by the current repository maintainer, independent from the original repository's release cadence and maintenance plan.
+
+### Additional Features Compared with the Upstream Repository
+
+While keeping the original core capabilities, this fork mainly adds the following enhancements around configuration loading and Tavily integration:
+
+- **Enhanced local config loading**: supports reading settings from the project root `.env`, `~/.config/grok-search/.env`, and an env file specified via `GROK_SEARCH_ENV_FILE`, in addition to regular environment variables.
+- **Multiple Tavily key support**: supports configuring multiple Tavily API keys through `TAVILY_API_KEYS`, with automatic rotation after a key enters cooldown on failure.
+- **Unified Tavily client wrapper**: consolidates Tavily `search`, `extract`, and `map` calls behind one client so the same key selection, cooldown, and error-handling logic is reused.
+- **Multi-key compatibility fixes**: Tavily-dependent features such as extra source retrieval, page fetch, and site map now determine availability from the multi-key configuration, so `TAVILY_API_KEYS` setups work correctly.
+- **Expanded config diagnostics**: `get_config_info` also reports loaded env files and the Tavily key count, making configuration troubleshooting easier.
+
 ```
 Claude --MCP--> Grok Search Server
                   ├─ web_search  ---> Grok API (AI Search)
@@ -111,10 +127,30 @@ claude mcp add-json grok-search --scope user '{
   "env": {
     "GROK_API_URL": "https://your-api-endpoint.com/v1",
     "GROK_API_KEY": "your-grok-api-key",
-    "TAVILY_API_KEY": "tvly-your-tavily-key",
+    "TAVILY_API_KEYS": ["tvly-your-tavily-key1", "tvly-your-tavily-key2"],
     "TAVILY_API_URL": "https://api.tavily.com"
   }
 }'
+```
+
+You can also configure Tavily locally via `.env`. The server loads settings in this order:
+
+1. Environment variables explicitly injected by the MCP client
+2. Project root `.env`
+3. `~/.config/grok-search/.env`
+
+Example:
+
+```env
+TAVILY_API_URL=https://api.tavily.com
+TAVILY_API_KEYS=["tvly-key-1","tvly-key-2","tvly-key-3"]
+```
+
+The legacy single-key form still works:
+
+```env
+TAVILY_API_URL=https://api.tavily.com
+TAVILY_API_KEY=tvly-your-tavily-key
 ```
 
 You can also configure additional environment variables in the `env` field:
@@ -127,8 +163,10 @@ You can also configure additional environment variables in the `env` field:
 | `GROK_API_KEY` | No | `{GUDA_API_KEY}` | Grok API key, overrides GuDa-derived value |
 | `GROK_MODEL` | No | `grok-4.20-beta` | Default model (takes precedence over `~/.config/grok-search/config.json` when set) |
 | `TAVILY_API_KEY` | No | `{GUDA_API_KEY}` | Tavily API key (for web_fetch / web_map) |
+| `TAVILY_API_KEYS` | No | - | Multiple Tavily API keys in JSON array format, used in rotation |
 | `TAVILY_API_URL` | No | `{GUDA_BASE_URL}/tavily` | Tavily API endpoint |
 | `TAVILY_ENABLED` | No | `true` | Enable Tavily |
+| `TAVILY_KEY_COOLDOWN_SECONDS` | No | `60` | Cooldown after a Tavily key fails |
 | `FIRECRAWL_API_KEY` | No | `{GUDA_API_KEY}` | Firecrawl API key (fallback when Tavily fails) |
 | `FIRECRAWL_API_URL` | No | `{GUDA_BASE_URL}/firecrawl` | Firecrawl API endpoint |
 | `GROK_DEBUG` | No | `false` | Debug mode |

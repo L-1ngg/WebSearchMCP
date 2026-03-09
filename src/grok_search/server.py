@@ -13,12 +13,14 @@ from pydantic import Field
 # 尝试使用绝对导入（支持 mcp run）
 try:
     from grok_search.providers.grok import GrokSearchProvider
+    from grok_search.providers.tavily import TavilyClient
     from grok_search.logger import log_info
     from grok_search.config import config
     from grok_search.sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
     from grok_search.planning import engine as planning_engine, _split_csv
 except ImportError:
     from .providers.grok import GrokSearchProvider
+    from .providers.tavily import TavilyClient
     from .logger import log_info
     from .config import config
     from .sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
@@ -31,6 +33,27 @@ mcp = FastMCP("grok-search")
 _SOURCES_CACHE = SourcesCache(max_size=256)
 _AVAILABLE_MODELS_CACHE: dict[tuple[str, str], list[str]] = {}
 _AVAILABLE_MODELS_LOCK = asyncio.Lock()
+_TAVILY_CLIENT: TavilyClient | None = None
+_TAVILY_CLIENT_FINGERPRINT: tuple[str, tuple[str, ...], int] | None = None
+
+
+def _get_tavily_client() -> TavilyClient:
+    global _TAVILY_CLIENT, _TAVILY_CLIENT_FINGERPRINT
+
+    fingerprint = (
+        config.tavily_api_url,
+        tuple(config.tavily_api_keys),
+        config.tavily_key_cooldown_seconds,
+    )
+    if _TAVILY_CLIENT is None or _TAVILY_CLIENT_FINGERPRINT != fingerprint:
+        _TAVILY_CLIENT = TavilyClient(
+            api_url=fingerprint[0],
+            api_keys=list(fingerprint[1]),
+            cooldown_seconds=fingerprint[2],
+        )
+        _TAVILY_CLIENT_FINGERPRINT = fingerprint
+
+    return _TAVILY_CLIENT
 
 
 async def _fetch_available_models(api_url: str, api_key: str) -> list[str]:
@@ -115,8 +138,8 @@ def _extra_results_to_sources(
     name="web_search",
     output_schema=None,
     description="""
-    Before using this tool, please use the plan_intent tool to plan the search carefully.
     Performs a deep web search based on the given query and returns Grok's answer directly.
+    Optionally, use the plan_intent tool beforehand for complex multi-step searches.
 
     This tool extracts sources if provided by upstream, caches them, and returns:
     - session_id: string (When you feel confused or curious about the main content, use this field to invoke the get_sources tool to obtain the corresponding list of information sources)
@@ -150,7 +173,7 @@ async def web_search(
     grok_provider = GrokSearchProvider(api_url, api_key, effective_model)
 
     # 计算额外信源配额
-    has_tavily = bool(config.tavily_api_key)
+    has_tavily = config.tavily_enabled and bool(config.tavily_api_keys)
     has_firecrawl = bool(config.firecrawl_api_key)
     firecrawl_count = 0
     tavily_count = 0
@@ -234,51 +257,21 @@ async def get_sources(
 
 
 async def _call_tavily_extract(url: str) -> str | None:
-    import httpx
-    api_url = config.tavily_api_url
-    api_key = config.tavily_api_key
-    if not api_key:
+    client = _get_tavily_client()
+    if not client.is_configured:
         return None
-    endpoint = f"{api_url.rstrip('/')}/extract"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    body = {"urls": [url], "format": "markdown"}
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(endpoint, headers=headers, json=body)
-            response.raise_for_status()
-            data = response.json()
-            if data.get("results") and len(data["results"]) > 0:
-                content = data["results"][0].get("raw_content", "")
-                return content if content and content.strip() else None
-            return None
+        return await client.extract(url)
     except Exception:
         return None
 
 
 async def _call_tavily_search(query: str, max_results: int = 6) -> list[dict] | None:
-    import httpx
-    api_key = config.tavily_api_key
-    if not api_key:
+    client = _get_tavily_client()
+    if not client.is_configured:
         return None
-    endpoint = f"{config.tavily_api_url.rstrip('/')}/search"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    body = {
-        "query": query,
-        "max_results": max_results,
-        "search_depth": "advanced",
-        "include_raw_content": False,
-        "include_answer": False,
-    }
     try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            response = await client.post(endpoint, headers=headers, json=body)
-            response.raise_for_status()
-            data = response.json()
-            results = data.get("results", [])
-            return [
-                {"title": r.get("title", ""), "url": r.get("url", ""), "content": r.get("content", ""), "score": r.get("score", 0)}
-                for r in results
-            ] if results else None
+        return await client.search(query, max_results)
     except Exception:
         return None
 
@@ -372,8 +365,8 @@ async def web_fetch(
         return result
 
     await log_info(ctx, "Fetch Failed!", config.debug_enabled)
-    if not config.tavily_api_key and not config.firecrawl_api_key:
-        return "配置错误: TAVILY_API_KEY 和 FIRECRAWL_API_KEY 均未配置"
+    if not config.tavily_api_keys and not config.firecrawl_api_key:
+        return "配置错误: TAVILY_API_KEY / TAVILY_API_KEYS 和 FIRECRAWL_API_KEY 均未配置"
     return "提取失败: 所有提取服务均未能获取内容"
 
 
@@ -381,25 +374,18 @@ async def _call_tavily_map(url: str, instructions: str = None, max_depth: int = 
                            max_breadth: int = 20, limit: int = 50, timeout: int = 150) -> str:
     import httpx
     import json
-    api_url = config.tavily_api_url
-    api_key = config.tavily_api_key
-    if not api_key:
-        return "配置错误: TAVILY_API_KEY 未配置，请设置环境变量 TAVILY_API_KEY"
-    endpoint = f"{api_url.rstrip('/')}/map"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    body = {"url": url, "max_depth": max_depth, "max_breadth": max_breadth, "limit": limit, "timeout": timeout}
-    if instructions:
-        body["instructions"] = instructions
+    client = _get_tavily_client()
+    if not client.is_configured:
+        return "配置错误: TAVILY_API_KEY / TAVILY_API_KEYS 未配置，请设置环境变量或本地 .env"
     try:
-        async with httpx.AsyncClient(timeout=float(timeout + 10)) as client:
-            response = await client.post(endpoint, headers=headers, json=body)
-            response.raise_for_status()
-            data = response.json()
-            return json.dumps({
-                "base_url": data.get("base_url", ""),
-                "results": data.get("results", []),
-                "response_time": data.get("response_time", 0)
-            }, ensure_ascii=False, indent=2)
+        data = await client.map(url, instructions or "", max_depth, max_breadth, limit, timeout)
+        if not data:
+            return "映射失败: Tavily 未返回可用结果"
+        return json.dumps({
+            "base_url": data.get("base_url", ""),
+            "results": data.get("results", []),
+            "response_time": data.get("response_time", 0)
+        }, ensure_ascii=False, indent=2)
     except httpx.TimeoutException:
         return f"映射超时: 请求超过{timeout}秒"
     except httpx.HTTPStatusError as e:

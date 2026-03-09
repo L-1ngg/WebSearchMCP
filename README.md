@@ -1,4 +1,5 @@
 ![这是图片](./images/title.png)
+
 <div align="center">
 
 <!-- # Grok Search MCP -->
@@ -16,6 +17,22 @@
 ## 一、概述
 
 Grok Search MCP 是一个基于 [FastMCP](https://github.com/jlowin/fastmcp) 构建的 MCP 服务器，采用**双引擎架构**：**Grok** 负责 AI 驱动的智能搜索，**Tavily** 负责高保真网页抓取与站点映射，各取所长为 Claude Code / Cherry Studio 等LLM Client提供完整的实时网络访问能力。
+
+## 项目来源
+
+本仓库基于 [GuDaStudio/GrokSearch](https://github.com/GuDaStudio/GrokSearch) 进行修改与扩展，保留原项目的 MIT License 及版权声明。
+
+当前仓库包含针对本地 `.env` 配置、多 Tavily API Key 轮询等功能的二次开发；新增功能与后续维护由当前仓库维护者负责，与原项目仓库的发布节奏和维护计划相互独立。
+
+### 相对原仓库的新增功能
+
+在保留原项目核心能力的基础上，当前仓库主要围绕配置读取与 Tavily 接入方式做了以下补充：
+
+- **本地配置读取增强**：支持从项目根目录 `.env`、`~/.config/grok-search/.env` 以及 `GROK_SEARCH_ENV_FILE` 指定的 env 文件读取配置，补充原有环境变量方式。
+- **多 Tavily Key 支持**：支持通过 `TAVILY_API_KEYS` 配置多个 Tavily API Key，并在单个 Key 失败后按冷却时间自动轮换。
+- **Tavily 调用统一封装**：将 Tavily 的 `search`、`extract`、`map` 调用统一收敛到客户端中，复用同一套 Key 选择、失败冷却与错误处理逻辑。
+- **多 Key 场景兼容修正**：额外信源补充、网页抓取与站点映射等 Tavily 相关能力，改为基于多 Key 配置判断可用性，使 `TAVILY_API_KEYS` 场景下能够正常工作。
+- **配置诊断信息补充**：`get_config_info` 会额外展示已加载的 env 文件列表以及 Tavily Key 数量，便于排查配置来源与多 Key 状态。
 
 ```
 Claude ──MCP──► Grok Search Server
@@ -35,12 +52,33 @@ Claude ──MCP──► Grok Search Server
 - 父进程监控（Windows 下自动检测父进程退出，防止僵尸进程）
 
 ### 效果展示
+
 我们以在`cherry studio`中配置本MCP为例，展示了`claude-opus-4.6`模型如何通过本项目实现外部知识搜集，降低幻觉率。
 ![](./images/wogrok.png)
 如上图，**为公平实验，我们打开了claude模型内置的搜索工具**，然而opus 4.6仍然相信自己的内部常识，不查询FastAPI的官方文档，以获取最新示例。
 ![](./images/wgrok.png)
-如上图，当打开`grok-search MCP`时，在相同的实验条件下，opus 4.6主动调用多次搜索，以**获取官方文档，回答更可靠。** 
+如上图，当打开`grok-search MCP`时，在相同的实验条件下，opus 4.6主动调用多次搜索，以**获取官方文档，回答更可靠。**
 
+### cherrystudio配置
+
+参数设置：
+```
+--from
+D:\Code\github\WebSearch
+grok-search
+```
+环境变量：根据需要配置,这里展示我的配置项
+```
+GROK_API_URL=
+GROK_API_KEY=
+GROK_MODEL=grok-4.20-beta
+TAVILY_API_URL=https://api.tavily.com
+TAVILY_ENABLED=true
+GROK_DEBUG=false
+GROK_LOG_LEVEL=INFO
+GROK_SEARCH_ENV_FILE=D:\Code\github\WebSearch\.env
+```
+这里没有配置 `TAVILY_API_URLS` 的原因是我在.env文件里配置的，其余的配置项也可以写在.env文件里
 
 ## 二、安装
 
@@ -66,11 +104,12 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 </details>
 
 ### 一键安装
+
 若之前安装过本项目，使用以下命令卸载旧版MCP。
+
 ```
 claude mcp remove grok-search
 ```
-
 
 将以下命令中的环境变量替换为你自己的值后执行。Grok 接口需为 OpenAI 兼容格式；Tavily 为可选配置，未配置时工具 `web_fetch` 和 `web_map` 不可用。
 
@@ -86,7 +125,7 @@ claude mcp add-json grok-search --scope user '{
   "env": {
     "GROK_API_URL": "https://your-api-endpoint.com/v1",
     "GROK_API_KEY": "your-grok-api-key",
-    "TAVILY_API_KEY": "tvly-your-tavily-key",
+    "TAVILY_API_KEYS": ["tvly-your-tavily-key1", "tvly-your-tavily-key2"],
     "TAVILY_API_URL": "https://api.tavily.com"
   }
 }'
@@ -113,11 +152,32 @@ claude mcp add-json grok-search --scope user '{
   "env": {
     "GROK_API_URL": "https://your-api-endpoint.com/v1",
     "GROK_API_KEY": "your-grok-api-key",
-    "TAVILY_API_KEY": "tvly-your-tavily-key",
+    "TAVILY_API_KEYS": ["tvly-your-tavily-key1", "tvly-your-tavily-key2"],
     "TAVILY_API_URL": "https://api.tavily.com"
   }
 }'
+
 </details> ```
+
+也支持在本地 `.env` 中配置 Tavily。服务会按以下顺序读取配置：
+
+1. MCP Client 显式传入的环境变量（如 Cherry Studio / Claude Code 的 `env`）
+2. 项目根目录 `.env`
+3. `~/.config/grok-search/.env`
+
+示例：
+
+```env
+TAVILY_API_URL=https://api.tavily.com
+TAVILY_API_KEYS=["tvly-key-1","tvly-key-2","tvly-key-3"]
+```
+
+如果只配置单个 Key，也仍然兼容旧写法：
+
+```env
+TAVILY_API_URL=https://api.tavily.com
+TAVILY_API_KEY=tvly-your-tavily-key
+```
 
 除此之外，你还可以在`env`字段中配置更多环境变量
 
@@ -126,9 +186,11 @@ claude mcp add-json grok-search --scope user '{
 | `GROK_API_URL` | ✅ | - | Grok API 地址（OpenAI 兼容格式） |
 | `GROK_API_KEY` | ✅ | - | Grok API 密钥 |
 | `GROK_MODEL` | ❌ | `grok-4-fast` | 默认模型（设置后优先于 `~/.config/grok-search/config.json`） |
-| `TAVILY_API_KEY` | ❌ | - | Tavily API 密钥（用于 web_fetch / web_map） |
+| `TAVILY_API_KEY` | ❌ | - | 单个 Tavily API 密钥（兼容旧写法，用于 web_fetch / web_map） |
+| `TAVILY_API_KEYS` | ❌ | - | 多个 Tavily API 密钥，使用 JSON 数组格式配置，按轮询顺序使用 |
 | `TAVILY_API_URL` | ❌ | `https://api.tavily.com` | Tavily API 地址 |
 | `TAVILY_ENABLED` | ❌ | `true` | 是否启用 Tavily |
+| `TAVILY_KEY_COOLDOWN_SECONDS` | ❌ | `60` | 单个 Tavily Key 失败后的冷却秒数 |
 | `FIRECRAWL_API_KEY` | ❌ | - | Firecrawl API 密钥（Tavily 失败时托底） |
 | `FIRECRAWL_API_URL` | ❌ | `https://api.firecrawl.dev/v2` | Firecrawl API 地址 |
 | `GROK_DEBUG` | ❌ | `false` | 调试模式 |
@@ -138,20 +200,19 @@ claude mcp add-json grok-search --scope user '{
 | `GROK_RETRY_MULTIPLIER` | ❌ | `1` | 重试退避乘数 |
 | `GROK_RETRY_MAX_WAIT` | ❌ | `10` | 重试最大等待秒数 |
 
-
 ### 验证安装
 
 ```bash
 claude mcp list
 ```
 
-🍟 显示连接成功后，我们**十分推荐**在 Claude 对话中输入 
+🍟 显示连接成功后，我们**十分推荐**在 Claude 对话中输入
+
 ```
 调用 grok-search toggle_builtin_tools，关闭Claude Code's built-in WebSearch and WebFetch tools
 ```
+
 工具将自动修改**项目级** `.claude/settings.json` 的 `permissions.deny`，一键禁用 Claude Code 官方的 WebSearch 和 WebFetch，从而迫使claude code调用本项目实现搜索！
-
-
 
 ## 三、MCP 工具介绍
 
@@ -174,6 +235,7 @@ claude mcp list
 自动检测查询中的时间相关关键词（如"最新""今天""recent"等），注入本地时间上下文以提升时效性搜索的准确度。
 
 返回值（结构化字典）：
+
 - `session_id`: 本次查询的会话 ID
 - `content`: Grok 回答正文（已自动剥离信源）
 - `sources_count`: 已缓存的信源数量
@@ -187,6 +249,7 @@ claude mcp list
 | `session_id` | string | ✅ | `web_search` 返回的 `session_id` |
 
 返回值（结构化字典）：
+
 - `session_id`
 - `sources_count`
 - `sources`: 信源列表（每项包含 `url`，可能包含 `title`/`description`/`provider`）
@@ -235,6 +298,7 @@ claude mcp list
 ### `search_planning` — 搜索规划
 
 结构化搜索规划脚手架（分阶段、多轮），用于在执行复杂搜索前先生成可执行的搜索计划。
+
 </details>
 
 ## 四、常见问题
@@ -266,9 +330,4 @@ A: 在 Claude 对话中说"显示 grok-search 配置信息"，将自动测试 AP
 
 ---
 
-<div align="center">
-
 **如果这个项目对您有帮助，请给个 Star！**
-
-[![Star History Chart](https://api.star-history.com/svg?repos=GuDaStudio/GrokSearch&type=date&legend=top-left)](https://www.star-history.com/#GuDaStudio/GrokSearch&type=date&legend=top-left)
-</div>
