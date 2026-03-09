@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "grok-search"
+name = "web-search"
 version = "0.1.0"
-description = "MCP server for AI model search capabilities"
+description = "MCP server for web search capabilities"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -25,4 +25,4 @@ dev = [
 where = ["src"]
 
 [project.scripts]
-grok-search = "grok_search.server:main"
+web-search = "web_search.server:main"

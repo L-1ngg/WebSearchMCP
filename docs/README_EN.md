@@ -27,7 +27,7 @@ This fork includes secondary development around local `.env` configuration and m
 
 While keeping the original core capabilities, this fork mainly adds the following enhancements around configuration loading and Tavily integration:
 
-- **Enhanced local config loading**: supports reading settings from the project root `.env`, `~/.config/grok-search/.env`, and an env file specified via `GROK_SEARCH_ENV_FILE`, in addition to regular environment variables.
+- **Enhanced local config loading**: supports reading settings from the project root `.env`, `~/.config/web-search/.env`, and an env file specified via `GROK_SEARCH_ENV_FILE`, in addition to regular environment variables.
 - **Multiple Tavily key support**: supports configuring multiple Tavily API keys through `TAVILY_API_KEYS`, with automatic rotation after a key enters cooldown on failure.
 - **Unified Tavily client wrapper**: consolidates Tavily `search`, `extract`, and `map` calls behind one client so the same key selection, cooldown, and error-handling logic is reused.
 - **Multi-key compatibility fixes**: Tavily-dependent features such as extra source retrieval, page fetch, and site map now determine availability from the multi-key configuration, so `TAVILY_API_KEYS` setups work correctly.
@@ -57,7 +57,7 @@ Using `cherry studio` with this MCP configured, here's how `claude-opus-4.6` lev
 As shown above, **for a fair experiment, we enabled Claude's built-in search tools**, yet Opus 4.6 still relied on its internal knowledge without consulting FastAPI's official documentation for the latest examples.
 
 ![](../images/wgrok.png)
-As shown above, with `grok-search MCP` enabled under the same experimental conditions, Opus 4.6 proactively made multiple search calls to **retrieve official documentation, producing more reliable answers.**
+As shown above, with `web-search MCP` enabled under the same experimental conditions, Opus 4.6 proactively made multiple search calls to **retrieve official documentation, producing more reliable answers.**
 
 
 ## 2. Installation
@@ -87,7 +87,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 If you have previously installed this project, remove the old MCP first:
 ```
-claude mcp remove grok-search
+claude mcp remove web-search
 ```
 
 Replace the environment variables in the following command with your own values. The Grok endpoint must be OpenAI-compatible; Tavily is optional — `web_fetch` and `web_map` will be unavailable without it.
@@ -96,33 +96,19 @@ Replace the environment variables in the following command with your own values.
 
 GuDa users only need to set `GUDA_API_KEY` to access all services — API URLs are automatically derived:
 
-```bash
-claude mcp add-json grok-search --scope user '{
-  "type": "stdio",
-  "command": "uvx",
-  "args": [
-    "--from",
-    "git+https://github.com/GuDaStudio/GrokSearch@grok-with-tavily",
-    "grok-search"
-  ],
-  "env": {
-    "GUDA_API_KEY": "your-guda-api-key"
-  }
-}'
-```
 
 #### Custom Configuration
 
 To use your own API endpoints, configure each service separately:
 
 ```bash
-claude mcp add-json grok-search --scope user '{
+claude mcp add-json web-search --scope user '{
   "type": "stdio",
   "command": "uvx",
   "args": [
     "--from",
     "git+https://github.com/GuDaStudio/GrokSearch@grok-with-tavily",
-    "grok-search"
+    "web-search"
   ],
   "env": {
     "GROK_API_URL": "https://your-api-endpoint.com/v1",
@@ -137,7 +123,7 @@ You can also configure Tavily locally via `.env`. The server loads settings in t
 
 1. Environment variables explicitly injected by the MCP client
 2. Project root `.env`
-3. `~/.config/grok-search/.env`
+3. `~/.config/web-search/.env`
 
 Example:
 
@@ -161,7 +147,7 @@ You can also configure additional environment variables in the `env` field:
 | `GUDA_BASE_URL` | No | `https://code.guda.studio` | GuDa service base URL |
 | `GROK_API_URL` | No | `{GUDA_BASE_URL}/grok/v1` | Grok API endpoint (OpenAI-compatible), overrides GuDa-derived value |
 | `GROK_API_KEY` | No | `{GUDA_API_KEY}` | Grok API key, overrides GuDa-derived value |
-| `GROK_MODEL` | No | `grok-4.20-beta` | Default model (takes precedence over `~/.config/grok-search/config.json` when set) |
+| `GROK_MODEL` | No | `grok-4.20-beta` | Default model (takes precedence over `~/.config/web-search/config.json` when set) |
 | `TAVILY_API_KEY` | No | `{GUDA_API_KEY}` | Tavily API key (for web_fetch / web_map) |
 | `TAVILY_API_KEYS` | No | - | Multiple Tavily API keys in JSON array format, used in rotation |
 | `TAVILY_API_URL` | No | `{GUDA_BASE_URL}/tavily` | Tavily API endpoint |
@@ -187,7 +173,7 @@ claude mcp list
 
 After confirming a successful connection, we **highly recommend** typing the following in a Claude conversation:
 ```
-Call grok-search toggle_builtin_tools to disable Claude Code's built-in WebSearch and WebFetch tools
+Call web-search toggle_builtin_tools to disable Claude Code's built-in WebSearch and WebFetch tools
 ```
 This will automatically modify the **project-level** `.claude/settings.json` `permissions.deny`, disabling Claude Code's built-in WebSearch and WebFetch, forcing Claude Code to use this project for searches!
 
@@ -262,7 +248,7 @@ No parameters required. Displays all configuration status, tests Grok API connec
 |-----------|------|----------|-------------|
 | `model` | string | Yes | Model ID (e.g., `"grok-4-fast"`, `"grok-2-latest"`) |
 
-Settings persist to `~/.config/grok-search/config.json` across sessions.
+Settings persist to `~/.config/web-search/config.json` across sessions.
 
 ### `toggle_builtin_tools` — Tool Routing Control
 
@@ -297,7 +283,7 @@ A: An OpenAI-compatible API endpoint (supporting `/chat/completions` and `/model
 <summary>
 Q: How to verify configuration?
 </summary>
-A: Say "Show grok-search configuration info" in a Claude conversation to automatically test the API connection and display results.
+A: Say "Show web-search configuration info" in a Claude conversation to automatically test the API connection and display results.
 </details>
 
 ## License

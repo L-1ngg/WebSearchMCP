@@ -12,12 +12,12 @@ from pydantic import Field
 
 # 尝试使用绝对导入（支持 mcp run）
 try:
-    from grok_search.providers.grok import GrokSearchProvider
-    from grok_search.providers.tavily import TavilyClient
-    from grok_search.logger import log_info
-    from grok_search.config import config
-    from grok_search.sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
-    from grok_search.planning import engine as planning_engine, _split_csv
+    from web_search.providers.grok import GrokSearchProvider
+    from web_search.providers.tavily import TavilyClient
+    from web_search.logger import log_info
+    from web_search.config import config
+    from web_search.sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
+    from web_search.planning import engine as planning_engine, _split_csv
 except ImportError:
     from .providers.grok import GrokSearchProvider
     from .providers.tavily import TavilyClient
@@ -28,7 +28,7 @@ except ImportError:
 
 import asyncio
 
-mcp = FastMCP("grok-search")
+mcp = FastMCP("web-search")
 
 _SOURCES_CACHE = SourcesCache(max_size=256)
 _AVAILABLE_MODELS_CACHE: dict[tuple[str, str], list[str]] = {}
@@ -529,7 +529,7 @@ async def get_config_info() -> str:
 
     **Key Features:**
         - **Model Selection:** Change the AI model for web search and content fetching.
-        - **Persistent Storage:** Model preference saved to ~/.config/grok-search/config.json.
+        - **Persistent Storage:** Model preference saved to ~/.config/web-search/config.json.
         - **Immediate Effect:** New model used for all subsequent operations.
 
     **Edge Cases & Best Practices:**

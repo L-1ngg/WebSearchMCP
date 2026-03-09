@@ -9,7 +9,7 @@ from pathlib import Path
 class Config:
     _instance = None
     _SETUP_COMMAND = (
-        'claude mcp add-json grok-search --scope user '
+        "claude mcp add-json web-search --scope user "
         '\'{"type":"stdio","command":"uvx","args":["--from",'
         '"git+https://github.com/GuDaStudio/GrokSearch","grok-search"],'
         '"env":{"GROK_API_URL":"your-api-url","GROK_API_KEY":"your-api-key"}}\''
@@ -27,11 +27,11 @@ class Config:
     @property
     def config_file(self) -> Path:
         if self._config_file is None:
-            config_dir = Path.home() / ".config" / "grok-search"
+            config_dir = Path.home() / ".config" / "web-search"
             try:
                 config_dir.mkdir(parents=True, exist_ok=True)
             except OSError:
-                config_dir = Path.cwd() / ".grok-search"
+                config_dir = Path.cwd() / ".web-search"
                 config_dir.mkdir(parents=True, exist_ok=True)
             self._config_file = config_dir / "config.json"
         return self._config_file
@@ -54,7 +54,11 @@ class Config:
 
     def _iter_env_files(self) -> list[Path]:
         candidates: list[Path] = [self.config_file.parent / ".env", Path.cwd() / ".env"]
-        explicit = os.getenv("GROK_SEARCH_ENV_FILE", "").strip()
+        # 支持新旧两种环境变量名，保持向后兼容
+        explicit = os.getenv("WEB_SEARCH_ENV_FILE") or os.getenv(
+            "GROK_SEARCH_ENV_FILE", ""
+        )
+        explicit = explicit.strip()
         if explicit:
             candidates.append(Path(explicit).expanduser())
 
@@ -89,7 +93,11 @@ class Config:
                     value = value.strip()
                     if not key:
                         continue
-                    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                    if (
+                        len(value) >= 2
+                        and value[0] == value[-1]
+                        and value[0] in ('"', "'")
+                    ):
                         value = value[1:-1]
                     env_data[key] = value
         except OSError:
@@ -134,7 +142,11 @@ class Config:
 
     @property
     def debug_enabled(self) -> bool:
-        return (self._get_setting("GROK_DEBUG", "false") or "false").lower() in ("true", "1", "yes")
+        return (self._get_setting("GROK_DEBUG", "false") or "false").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
 
     @staticmethod
     def _safe_int(value: str | None, default: int) -> int:
@@ -164,7 +176,9 @@ class Config:
 
     @property
     def tavily_key_cooldown_seconds(self) -> int:
-        return self._safe_int(self._get_setting("TAVILY_KEY_COOLDOWN_SECONDS", "60"), 60)
+        return self._safe_int(
+            self._get_setting("TAVILY_KEY_COOLDOWN_SECONDS", "60"), 60
+        )
 
     @property
     def grok_api_url(self) -> str:
@@ -188,11 +202,18 @@ class Config:
 
     @property
     def tavily_enabled(self) -> bool:
-        return (self._get_setting("TAVILY_ENABLED", "true") or "true").lower() in ("true", "1", "yes")
+        return (self._get_setting("TAVILY_ENABLED", "true") or "true").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
 
     @property
     def tavily_api_url(self) -> str:
-        return self._get_setting("TAVILY_API_URL", "https://api.tavily.com") or "https://api.tavily.com"
+        return (
+            self._get_setting("TAVILY_API_URL", "https://api.tavily.com")
+            or "https://api.tavily.com"
+        )
 
     @property
     def tavily_api_keys(self) -> list[str]:
@@ -210,7 +231,10 @@ class Config:
 
     @property
     def firecrawl_api_url(self) -> str:
-        return self._get_setting("FIRECRAWL_API_URL", "https://api.firecrawl.dev/v2") or "https://api.firecrawl.dev/v2"
+        return (
+            self._get_setting("FIRECRAWL_API_URL", "https://api.firecrawl.dev/v2")
+            or "https://api.firecrawl.dev/v2"
+        )
 
     @property
     def firecrawl_api_key(self) -> str | None:
@@ -227,7 +251,7 @@ class Config:
         if log_dir.is_absolute():
             return log_dir
 
-        home_log_dir = Path.home() / ".config" / "grok-search" / log_dir_str
+        home_log_dir = Path.home() / ".config" / "web-search" / log_dir_str
         try:
             home_log_dir.mkdir(parents=True, exist_ok=True)
             return home_log_dir
@@ -241,7 +265,7 @@ class Config:
         except OSError:
             pass
 
-        tmp_log_dir = Path(tempfile.gettempdir()) / "grok-search" / log_dir_str
+        tmp_log_dir = Path(tempfile.gettempdir()) / "web-search" / log_dir_str
         tmp_log_dir.mkdir(parents=True, exist_ok=True)
         return tmp_log_dir
 
@@ -302,10 +326,14 @@ class Config:
             "GROK_LOG_DIR": str(self.log_dir),
             "TAVILY_API_URL": self.tavily_api_url,
             "TAVILY_ENABLED": self.tavily_enabled,
-            "TAVILY_API_KEY": self._mask_api_key(tavily_keys[0]) if tavily_keys else "未配置",
+            "TAVILY_API_KEY": self._mask_api_key(tavily_keys[0])
+            if tavily_keys
+            else "未配置",
             "TAVILY_API_KEYS_COUNT": len(tavily_keys),
             "FIRECRAWL_API_URL": self.firecrawl_api_url,
-            "FIRECRAWL_API_KEY": self._mask_api_key(self.firecrawl_api_key) if self.firecrawl_api_key else "未配置",
+            "FIRECRAWL_API_KEY": self._mask_api_key(self.firecrawl_api_key)
+            if self.firecrawl_api_key
+            else "未配置",
             "ENV_FILES_LOADED": env_files,
             "config_status": config_status,
         }

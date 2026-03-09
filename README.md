@@ -28,7 +28,7 @@ Grok Search MCP 是一个基于 [FastMCP](https://github.com/jlowin/fastmcp) 构
 
 在保留原项目核心能力的基础上，当前仓库主要围绕配置读取与 Tavily 接入方式做了以下补充：
 
-- **本地配置读取增强**：支持从项目根目录 `.env`、`~/.config/grok-search/.env` 以及 `GROK_SEARCH_ENV_FILE` 指定的 env 文件读取配置，补充原有环境变量方式。
+- **本地配置读取增强**：支持从项目根目录 `.env`、`~/.config/web-search/.env` 以及 `GROK_SEARCH_ENV_FILE` 指定的 env 文件读取配置，补充原有环境变量方式。
 - **多 Tavily Key 支持**：支持通过 `TAVILY_API_KEYS` 配置多个 Tavily API Key，并在单个 Key 失败后按冷却时间自动轮换。
 - **Tavily 调用统一封装**：将 Tavily 的 `search`、`extract`、`map` 调用统一收敛到客户端中，复用同一套 Key 选择、失败冷却与错误处理逻辑。
 - **多 Key 场景兼容修正**：额外信源补充、网页抓取与站点映射等 Tavily 相关能力，改为基于多 Key 配置判断可用性，使 `TAVILY_API_KEYS` 场景下能够正常工作。
@@ -57,7 +57,7 @@ Claude ──MCP──► Grok Search Server
 ![](./images/wogrok.png)
 如上图，**为公平实验，我们打开了claude模型内置的搜索工具**，然而opus 4.6仍然相信自己的内部常识，不查询FastAPI的官方文档，以获取最新示例。
 ![](./images/wgrok.png)
-如上图，当打开`grok-search MCP`时，在相同的实验条件下，opus 4.6主动调用多次搜索，以**获取官方文档，回答更可靠。**
+如上图，当打开`web-search MCP`时，在相同的实验条件下，opus 4.6主动调用多次搜索，以**获取官方文档，回答更可靠。**
 
 ### cherrystudio配置
 
@@ -65,7 +65,7 @@ Claude ──MCP──► Grok Search Server
 ```
 --from
 D:\Code\github\WebSearch
-grok-search
+web-search
 ```
 环境变量：根据需要配置,这里展示我的配置项
 ```
@@ -108,28 +108,10 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 若之前安装过本项目，使用以下命令卸载旧版MCP。
 
 ```
-claude mcp remove grok-search
+claude mcp remove web-search
 ```
 
 将以下命令中的环境变量替换为你自己的值后执行。Grok 接口需为 OpenAI 兼容格式；Tavily 为可选配置，未配置时工具 `web_fetch` 和 `web_map` 不可用。
-
-```bash
-claude mcp add-json grok-search --scope user '{
-  "type": "stdio",
-  "command": "uvx",
-  "args": [
-    "--from",
-    "git+https://github.com/GuDaStudio/GrokSearch@grok-with-tavily",
-    "grok-search"
-  ],
-  "env": {
-    "GROK_API_URL": "https://your-api-endpoint.com/v1",
-    "GROK_API_KEY": "your-grok-api-key",
-    "TAVILY_API_KEYS": ["tvly-your-tavily-key1", "tvly-your-tavily-key2"],
-    "TAVILY_API_URL": "https://api.tavily.com"
-  }
-}'
-```
 
 <details> <summary>如果遇到 SSL / 证书验证错误</summary>
 
@@ -140,14 +122,14 @@ self signed certificate in certificate chain
 
 可以在 uvx 参数中添加 --native-tls，使其使用系统证书库：
 
-claude mcp add-json grok-search --scope user '{
+claude mcp add-json web-search --scope user '{
   "type": "stdio",
   "command": "uvx",
   "args": [
     "--native-tls",
     "--from",
     "git+https://github.com/GuDaStudio/GrokSearch@grok-with-tavily",
-    "grok-search"
+    "web-search"
   ],
   "env": {
     "GROK_API_URL": "https://your-api-endpoint.com/v1",
@@ -163,7 +145,7 @@ claude mcp add-json grok-search --scope user '{
 
 1. MCP Client 显式传入的环境变量（如 Cherry Studio / Claude Code 的 `env`）
 2. 项目根目录 `.env`
-3. `~/.config/grok-search/.env`
+3. `~/.config/web-search/.env`
 
 示例：
 
@@ -185,7 +167,7 @@ TAVILY_API_KEY=tvly-your-tavily-key
 |------|------|--------|------|
 | `GROK_API_URL` | ✅ | - | Grok API 地址（OpenAI 兼容格式） |
 | `GROK_API_KEY` | ✅ | - | Grok API 密钥 |
-| `GROK_MODEL` | ❌ | `grok-4-fast` | 默认模型（设置后优先于 `~/.config/grok-search/config.json`） |
+| `GROK_MODEL` | ❌ | `grok-4-fast` | 默认模型（设置后优先于 `~/.config/web-search/config.json`） |
 | `TAVILY_API_KEY` | ❌ | - | 单个 Tavily API 密钥（兼容旧写法，用于 web_fetch / web_map） |
 | `TAVILY_API_KEYS` | ❌ | - | 多个 Tavily API 密钥，使用 JSON 数组格式配置，按轮询顺序使用 |
 | `TAVILY_API_URL` | ❌ | `https://api.tavily.com` | Tavily API 地址 |
@@ -209,7 +191,7 @@ claude mcp list
 🍟 显示连接成功后，我们**十分推荐**在 Claude 对话中输入
 
 ```
-调用 grok-search toggle_builtin_tools，关闭Claude Code's built-in WebSearch and WebFetch tools
+调用 web-search toggle_builtin_tools，关闭Claude Code's built-in WebSearch and WebFetch tools
 ```
 
 工具将自动修改**项目级** `.claude/settings.json` 的 `permissions.deny`，一键禁用 Claude Code 官方的 WebSearch 和 WebFetch，从而迫使claude code调用本项目实现搜索！
@@ -285,7 +267,7 @@ claude mcp list
 |------|------|------|------|
 | `model` | string | ✅ | 模型 ID（如 `"grok-4-fast"`, `"grok-2-latest"`） |
 
-切换后配置持久化到 `~/.config/grok-search/config.json`，跨会话保持。
+切换后配置持久化到 `~/.config/web-search/config.json`，跨会话保持。
 
 ### `toggle_builtin_tools` — 工具路由控制
 
@@ -321,7 +303,7 @@ A: 需要 OpenAI 兼容格式的 API 地址（支持 `/chat/completions` 和 `/m
 <summary>
 Q: 如何验证配置？
 </summary>
-A: 在 Claude 对话中说"显示 grok-search 配置信息"，将自动测试 API 连接并显示结果。
+A: 在 Claude 对话中说"显示 web-search 配置信息"，将自动测试 API 连接并显示结果。
 </details>
 
 ## 许可证
