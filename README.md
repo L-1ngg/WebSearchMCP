@@ -64,7 +64,7 @@ Claude ──MCP──► Grok Search Server
 参数设置：
 ```
 --from
-git+https://github.com/L-1ngg/WebSearchMCP.git
+git+https://github.com/L-1ngg/WebSearchMCP
 web-search
 ```
 环境变量：根据需要配置,这里展示我的配置项
