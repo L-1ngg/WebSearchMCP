@@ -1,4 +1,5 @@
-from typing import List
+from dataclasses import dataclass
+from typing import List, Literal
 import re
 from .providers.base import SearchResult
 
@@ -206,36 +207,151 @@ rank_sources_prompt = (
     "Include every number exactly once. Nothing else."
 )
 
-search_prompt = """
-# Core Instruction
+@dataclass(frozen=True)
+class SearchPromptProfile:
+    level: Literal[1, 2, 3]
+    mode: Literal["direct", "balanced", "deep"]
+    query_type: Literal["factual", "comparative", "exploratory", "analytical"]
+    min_source_count: int
+    search_round_guidance: str
+    depth_guidance: str
+    stop_rule: str
 
-1. User needs may be vague. Think divergently, infer intent from multiple angles, and leverage full conversation context to progressively clarify their true needs.
-2. **Breadth-First Search**—Approach problems from multiple dimensions. Brainstorm 5+ perspectives and execute parallel searches for each. Consult as many high-quality sources as possible before responding.
-3. **Depth-First Search**—After broad exploration, select ≥2 most relevant perspectives for deep investigation into specialized knowledge.
-4. **Evidence-Based Reasoning & Traceable Sources**—Every claim must be followed by a citation (`citation_card` format). More credible sources strengthen arguments. If no references exist, remain silent.
-5. Before responding, ensure full execution of Steps 1–4.
+
+_COMPARATIVE_KEYWORDS = (
+    " vs ", " versus ", "compare", "comparison", "difference between", "pros and cons",
+    "tradeoff", "trade-off", "alternatives", "alternative", "对比", "比较", "区别",
+    "优缺点", "权衡", "替代", "哪个好", "怎么选",
+)
+_ANALYTICAL_KEYWORDS = (
+    "why", "how", "analyze", "analysis", "root cause", "architecture", "design",
+    "strategy", "deep dive", "benchmark", "best practice", "best practices",
+    "原因", "如何", "怎么", "分析", "根因", "原理", "架构", "设计", "策略", "评估", "最佳实践",
+)
+_EXPLORATORY_KEYWORDS = (
+    "overview", "survey", "guide", "landscape", "trends", "trend", "top", "best",
+    "list", "options", "recommend", "recommendation", "全面", "综述", "概览", "清单",
+    "推荐", "趋势", "盘点", "有哪些", "选择",
+)
+_CONSTRAINT_MARKERS = (" and ", " or ", ",", "，", ";", "；", "\n", "、", "以及", "与")
+
+
+def _count_keyword_hits(text: str, keywords: tuple[str, ...]) -> int:
+    return sum(1 for keyword in keywords if keyword in text)
+
+
+def classify_query_complexity(query: str) -> SearchPromptProfile:
+    normalized = (query or "").strip()
+    lower = f" {normalized.lower()} "
+    word_count = len(re.findall(r"[A-Za-z0-9_]+", normalized))
+    char_count = len(normalized)
+
+    comparative_hits = _count_keyword_hits(lower, _COMPARATIVE_KEYWORDS)
+    analytical_hits = _count_keyword_hits(lower, _ANALYTICAL_KEYWORDS)
+    exploratory_hits = _count_keyword_hits(lower, _EXPLORATORY_KEYWORDS)
+    constraint_hits = sum(normalized.count(marker) for marker in _CONSTRAINT_MARKERS)
+
+    query_type: Literal["factual", "comparative", "exploratory", "analytical"] = "factual"
+    if comparative_hits:
+        query_type = "comparative"
+    elif analytical_hits:
+        query_type = "analytical"
+    elif exploratory_hits:
+        query_type = "exploratory"
+
+    score = 0
+    if char_count >= 80 or word_count >= 14:
+        score += 1
+    if char_count >= 140 or word_count >= 24:
+        score += 1
+    if comparative_hits:
+        score += 2
+        if comparative_hits >= 2:
+            score += 1
+    if analytical_hits:
+        score += 2 if query_type == "analytical" else 1
+    if exploratory_hits:
+        score += 1
+    if constraint_hits >= 2:
+        score += 1
+    if normalized.count("?") + normalized.count("？") >= 2:
+        score += 1
+
+    if score >= 4:
+        return SearchPromptProfile(
+            level=3,
+            mode="deep",
+            query_type=query_type if query_type != "factual" else "analytical",
+            min_source_count=4,
+            search_round_guidance="Use up to three search rounds: broad orientation first, then one or two targeted follow-ups on the most decision-relevant gaps.",
+            depth_guidance="Examine 4-6 relevant dimensions. For comparisons, use consistent criteria. For analytical questions, evaluate at least two plausible explanations before concluding.",
+            stop_rule="Stop once the core conclusion is supported by at least 4 strong sources and additional searches would only add marginal detail.",
+        )
+
+    if score >= 2:
+        return SearchPromptProfile(
+            level=2,
+            mode="balanced",
+            query_type=query_type if query_type != "factual" else "exploratory",
+            min_source_count=3,
+            search_round_guidance="Use one primary search pass plus up to two focused follow-ups if the first pass leaves a material gap or conflict.",
+            depth_guidance="Cover the 3-4 most relevant dimensions and resolve obvious ambiguities before answering.",
+            stop_rule="Stop once the main answer is verified by at least 3 good sources and the remaining uncertainty is minor.",
+        )
+
+    return SearchPromptProfile(
+        level=1,
+        mode="direct",
+        query_type=query_type,
+        min_source_count=1,
+        search_round_guidance="Use 1-2 tightly targeted searches. Avoid broad exploration unless the first result is clearly insufficient or conflicting.",
+        depth_guidance="Stay focused on the single most likely interpretation of the query and gather only the evidence needed to answer it correctly.",
+        stop_rule="Stop as soon as the direct answer is supported well enough to respond confidently.",
+    )
+
+
+def build_search_prompt(query: str) -> str:
+    profile = classify_query_complexity(query)
+    source_section_max = max(4, profile.min_source_count + 3)
+
+    return f"""
+# Objective
+
+Use web search to answer the current query directly. Adapt search depth to the query complexity, but always converge to a final answer instead of searching indefinitely.
 
 ---
 
-# Search Instruction
+# Complexity Profile
 
-1. Think carefully before responding—anticipate the user’s true intent to ensure precision.
-2. Verify every claim rigorously to avoid misinformation.
-3. Follow problem logic—dig deeper until clues are exhaustively clear. If a question seems simple, still infer broader intent and search accordingly. Use multiple parallel tool calls per query and ensure answers are well-sourced.
-4. Search in English first (prioritizing English resources for volume/quality), but switch to Chinese if context demands.
-5. Prioritize authoritative sources: Wikipedia, academic databases, books, reputable media/journalism.
-6. Favor sharing in-depth, specialized knowledge over generic or common-sense content.
+- Complexity Level: {profile.level} ({profile.mode})
+- Query Type: {profile.query_type}
+- Minimum Source Target: {profile.min_source_count}
+- Search Rounds: {profile.search_round_guidance}
+- Depth Guidance: {profile.depth_guidance}
+- Stop Rule: {profile.stop_rule}
+
+---
+
+# Search Behavior
+
+1. Stay tightly scoped to the user's current query. Do not expand into unrelated perspectives unless the query clearly requires it.
+2. Prioritize authoritative and primary sources when possible.
+3. Search in English first when it improves source quality or coverage, but answer in the user's language unless the query requests otherwise.
+4. For time-sensitive questions, verify the latest facts and include concrete dates when relevant.
+5. If evidence is incomplete, state the uncertainty briefly and still provide the best supported answer you can.
+6. Do not remain silent solely because citations are incomplete.
+7. Do not output a search plan, future tool instructions, or meta commentary about searching.
+8. Do not continue searching just because more sources might exist. Continue only when another search is likely to materially change or validate the answer.
 
 ---
 
 # Output Style
 
-0. **Be direct—no unnecessary follow-ups**.
-1. Lead with the **most probable solution** before detailed analysis.
-2. **Define every technical term** in plain language (annotate post-paragraph).
-3. Explain expertise **simply yet profoundly**.
-4. **Respect facts and search results—use statistical rigor to discern truth**.
-5. **Every sentence must cite sources** (`citation_card`). More references = stronger credibility. Silence if uncited.
-6. Expand on key concepts—after proposing solutions, **use real-world analogies** to demystify technical terms.
-7. **Strictly format outputs in polished Markdown** (LaTeX for formulas, code blocks for scripts, etc.).
-"""
+1. Return a complete final answer in polished Markdown.
+2. Lead with the direct answer, then add brief supporting detail only when helpful.
+3. Keep the answer concise and decision-oriented.
+4. End with a short `Sources` section containing {profile.min_source_count}-{source_section_max} relevant URLs or Markdown links when available.
+""".strip()
+
+
+search_prompt = build_search_prompt("")

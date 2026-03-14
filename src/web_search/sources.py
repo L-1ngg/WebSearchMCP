@@ -73,22 +73,31 @@ def split_answer_and_sources(text: str) -> tuple[str, list[dict]]:
         return "", []
 
     split = _split_function_call_sources(raw)
-    if split:
+    if split and _answer_has_substance(split[0]):
         return split
 
     split = _split_heading_sources(raw)
-    if split:
+    if split and _answer_has_substance(split[0]):
         return split
 
     split = _split_details_block_sources(raw)
-    if split:
+    if split and _answer_has_substance(split[0]):
         return split
 
     split = _split_tail_link_block(raw)
-    if split:
+    if split and _answer_has_substance(split[0]):
         return split
 
     return raw, []
+
+
+def _answer_has_substance(answer: str) -> bool:
+    cleaned = (answer or "").strip()
+    if not cleaned:
+        return False
+    if _SOURCES_HEADING_PATTERN.fullmatch(cleaned):
+        return False
+    return True
 
 
 def _split_function_call_sources(text: str) -> tuple[str, list[dict]] | None:

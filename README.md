@@ -64,7 +64,7 @@ Claude ──MCP──► Grok Search Server
 参数设置：
 ```
 --from
-D:\Code\github\WebSearch
+git+https://github.com/L-1ngg/WebSearchMCP.git
 web-search
 ```
 环境变量：根据需要配置,这里展示我的配置项
@@ -73,10 +73,10 @@ GROK_API_URL=
 GROK_API_KEY=
 GROK_MODEL=grok-4.20-beta
 TAVILY_API_URL=https://api.tavily.com
+TAVILY_API_URLS=["xxx","xxx","xxxx"]
 TAVILY_ENABLED=true
 GROK_DEBUG=false
 GROK_LOG_LEVEL=INFO
-GROK_SEARCH_ENV_FILE=D:\Code\github\WebSearch\.env
 ```
 这里没有配置 `TAVILY_API_URLS` 的原因是我在.env文件里配置的，其余的配置项也可以写在.env文件里
 
@@ -203,7 +203,7 @@ claude mcp list
 
 ### `web_search` — AI 网络搜索
 
-通过 Grok API 执行 AI 驱动的网络搜索，默认仅返回 Grok 的回答正文，并返回 `session_id` 以便后续获取信源。
+通过 Grok API 执行一次定向网络搜索，返回可直接用于回答用户的正文，并返回 `session_id` 以便后续获取信源。
 
 `web_search` 输出不展开信源，仅返回 `sources_count`；信源会按 `session_id` 缓存在服务端，可用 `get_sources` 拉取。
 
@@ -221,10 +221,14 @@ claude mcp list
 - `session_id`: 本次查询的会话 ID
 - `content`: Grok 回答正文（已自动剥离信源）
 - `sources_count`: 已缓存的信源数量
+- `status`: `ok` / `error`
+- `answer_ready`: 当前 `content` 是否可直接用于回答用户
+- `sources_preview`: 最多 3 条轻量信源预览
+- `error`: 仅在 `status=error` 时出现，包含错误码与是否建议原样重试
 
 ### `get_sources` — 获取信源
 
-通过 `session_id` 获取对应 `web_search` 的全部信源。
+通过 `session_id` 获取对应 `web_search` 的全部缓存信源，用于校验或补充引用。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|

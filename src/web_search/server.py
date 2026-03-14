@@ -134,17 +134,78 @@ def _extra_results_to_sources(
     return sources
 
 
+def _build_sources_preview(sources: list[dict], limit: int = 3) -> list[dict]:
+    preview: list[dict] = []
+    for item in sources[:limit]:
+        url = (item.get("url") or "").strip()
+        if not url:
+            continue
+
+        out: dict = {"url": url}
+        for key in ("title", "provider"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                out[key] = value.strip()
+
+        description = item.get("description")
+        if isinstance(description, str) and description.strip():
+            out["description"] = description.strip()[:240]
+
+        preview.append(out)
+
+    return preview
+
+
+def _build_web_search_response(
+    session_id: str,
+    content: str,
+    sources: list[dict],
+    *,
+    status: str = "ok",
+    error_code: str = "",
+    error_message: str = "",
+    retry_same_query: bool = False,
+) -> dict:
+    normalized_content = (content or "").strip()
+    response = {
+        "session_id": session_id,
+        "content": normalized_content,
+        "sources_count": len(sources),
+        "status": status,
+        "answer_ready": status == "ok" and bool(normalized_content),
+    }
+
+    preview = _build_sources_preview(sources)
+    if preview:
+        response["sources_preview"] = preview
+
+    if status != "ok":
+        response["error"] = {
+            "code": error_code or "web_search_error",
+            "message": error_message or normalized_content or "web_search failed",
+            "retry_same_query": retry_same_query,
+        }
+
+    return response
+
+
 @mcp.tool(
     name="web_search",
     output_schema=None,
     description="""
-    Performs a deep web search based on the given query and returns Grok's answer directly.
-    Optionally, use the plan_intent tool beforehand for complex multi-step searches.
+    Performs one targeted web search and returns a synthesized answer.
 
-    This tool extracts sources if provided by upstream, caches them, and returns:
-    - session_id: string (When you feel confused or curious about the main content, use this field to invoke the get_sources tool to obtain the corresponding list of information sources)
-    - content: string (answer only)
+    Returns:
+    - session_id: string
+    - content: string
     - sources_count: int
+    - status: "ok" | "error"
+    - answer_ready: bool
+    - sources_preview: lightweight preview of up to 3 cached sources
+    - error: object, only present when status is "error"
+
+    Use get_sources only when the full cached source list is needed for citation or verification.
+    If status is "error", do not repeat the same query verbatim; answer with the limitation or refine the query first.
     """,
     meta={"version": "2.0.0", "author": "guda.studio"},
 )
@@ -153,6 +214,7 @@ async def web_search(
     platform: Annotated[str, "Target platform to focus on (e.g., 'Twitter', 'GitHub', 'Reddit'). Leave empty for general web search."] = "",
     model: Annotated[str, "Optional model ID for this request only. This value is used ONLY when user explicitly provided."] = "",
     extra_sources: Annotated[int, "Number of additional reference results from Tavily/Firecrawl. Set 0 to disable. Default 0."] = 0,
+    ctx: Context = None,
 ) -> dict:
     session_id = new_session_id()
     try:
@@ -160,14 +222,30 @@ async def web_search(
         api_key = config.grok_api_key
     except ValueError as e:
         await _SOURCES_CACHE.set(session_id, [])
-        return {"session_id": session_id, "content": f"配置错误: {str(e)}", "sources_count": 0}
+        message = f"配置错误: {str(e)}"
+        return _build_web_search_response(
+            session_id,
+            message,
+            [],
+            status="error",
+            error_code="config_error",
+            error_message=message,
+        )
 
     effective_model = config.grok_model
     if model:
         available = await _get_available_models_cached(api_url, api_key)
         if available and model not in available:
             await _SOURCES_CACHE.set(session_id, [])
-            return {"session_id": session_id, "content": f"无效模型: {model}", "sources_count": 0}
+            message = f"无效模型: {model}"
+            return _build_web_search_response(
+                session_id,
+                message,
+                [],
+                status="error",
+                error_code="invalid_model",
+                error_message=message,
+            )
         effective_model = model
 
     grok_provider = GrokSearchProvider(api_url, api_key, effective_model)
@@ -187,12 +265,6 @@ async def web_search(
             tavily_count = extra_sources
 
     # 并行执行搜索任务
-    async def _safe_grok() -> str:
-        try:
-            return await grok_provider.search(query, platform)
-        except Exception:
-            return ""
-
     async def _safe_tavily() -> list[dict] | None:
         try:
             if tavily_count:
@@ -207,38 +279,70 @@ async def web_search(
         except Exception:
             return None
 
-    coros: list = [_safe_grok()]
+    coros: list = [grok_provider.search(query, platform)]
     if tavily_count > 0:
         coros.append(_safe_tavily())
     if firecrawl_count > 0:
         coros.append(_safe_firecrawl())
 
-    gathered = await asyncio.gather(*coros)
+    gathered = await asyncio.gather(*coros, return_exceptions=True)
 
-    grok_result: str = gathered[0] or ""
+    grok_outcome = gathered[0]
+    grok_result: str = ""
     tavily_results: list[dict] | None = None
     firecrawl_results: list[dict] | None = None
     idx = 1
     if tavily_count > 0:
-        tavily_results = gathered[idx]
+        tavily_outcome = gathered[idx]
+        tavily_results = None if isinstance(tavily_outcome, Exception) else tavily_outcome
         idx += 1
     if firecrawl_count > 0:
-        firecrawl_results = gathered[idx]
+        firecrawl_outcome = gathered[idx]
+        firecrawl_results = None if isinstance(firecrawl_outcome, Exception) else firecrawl_outcome
 
-    answer, grok_sources = split_answer_and_sources(grok_result)
+    grok_sources: list[dict] = []
+    if not isinstance(grok_outcome, Exception):
+        grok_result = grok_outcome or ""
+        answer, grok_sources = split_answer_and_sources(grok_result)
+    else:
+        answer = ""
+
     extra = _extra_results_to_sources(tavily_results, firecrawl_results)
     all_sources = merge_sources(grok_sources, extra)
-
     await _SOURCES_CACHE.set(session_id, all_sources)
-    return {"session_id": session_id, "content": answer, "sources_count": len(all_sources)}
+
+    if isinstance(grok_outcome, Exception):
+        message = f"上游搜索失败: {type(grok_outcome).__name__}: {grok_outcome}"
+        await log_info(ctx, message, config.debug_enabled)
+        return _build_web_search_response(
+            session_id,
+            message,
+            all_sources,
+            status="error",
+            error_code="upstream_search_failed",
+            error_message=message,
+        )
+
+    if not answer.strip():
+        message = "搜索未返回可用答案正文"
+        await log_info(ctx, message, config.debug_enabled)
+        return _build_web_search_response(
+            session_id,
+            message,
+            all_sources,
+            status="error",
+            error_code="empty_answer",
+            error_message=message,
+        )
+
+    return _build_web_search_response(session_id, answer, all_sources)
 
 
 @mcp.tool(
     name="get_sources",
     description="""
-    When you feel confused or curious about the search response content, use the session_id returned by web_search to invoke the this tool to obtain the corresponding list of information sources.
-    Retrieve all cached sources for a previous web_search call.
-    Provide the session_id returned by web_search to get the full source list.
+    Retrieve the full cached source list for a previous web_search call.
+    Provide the session_id returned by web_search to fetch all cached sources for verification or citation.
     """,
     meta={"version": "1.0.0", "author": "guda.studio"},
 )

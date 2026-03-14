@@ -186,7 +186,7 @@ This will automatically modify the **project-level** `.claude/settings.json` `pe
 
 ### `web_search` — AI Web Search
 
-Executes AI-driven web search via Grok API. By default it returns only Grok's answer and a `session_id` for retrieving sources later.
+Executes one targeted web search via Grok API. It returns answer text suitable for responding to the user plus a `session_id` for retrieving sources later.
 
 `web_search` does not expand sources in the response; it only returns `sources_count`. Sources are cached server-side by `session_id` and can be fetched with `get_sources`.
 
@@ -203,10 +203,14 @@ Return value (structured dict):
 - `session_id`: search session ID
 - `content`: answer only (sources removed)
 - `sources_count`: cached sources count
+- `status`: `ok` / `error`
+- `answer_ready`: whether `content` is suitable for directly answering the user
+- `sources_preview`: up to 3 lightweight cached source previews
+- `error`: present only when `status=error`, including an error code and whether retrying the exact same query is advised
 
 ### `get_sources` — Retrieve Sources
 
-Retrieves the full cached source list for a previous `web_search` call.
+Retrieves the full cached source list for a previous `web_search` call, typically for verification or citations.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

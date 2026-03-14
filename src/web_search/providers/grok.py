@@ -7,7 +7,13 @@ from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait
 from tenacity.wait import wait_base
 from zoneinfo import ZoneInfo
 from .base import BaseSearchProvider, SearchResult
-from ..utils import search_prompt, fetch_prompt, url_describe_prompt, rank_sources_prompt
+from ..utils import (
+    build_search_prompt,
+    classify_query_complexity,
+    fetch_prompt,
+    url_describe_prompt,
+    rank_sources_prompt,
+)
 from ..logger import log_info
 from ..config import config
 
@@ -131,25 +137,35 @@ class GrokSearchProvider(BaseSearchProvider):
             "Content-Type": "application/json",
         }
         platform_prompt = ""
+        profile = classify_query_complexity(query)
 
         if platform:
             platform_prompt = "\n\nYou should search the web for the information you need, and focus on these platform: " + platform + "\n"
 
-        time_context = get_local_time_info() + "\n"
+        time_context = get_local_time_info() + "\n" if _needs_time_context(query) else ""
+        system_prompt = build_search_prompt(query)
 
         payload = {
             "model": self.model,
             "messages": [
                 {
                     "role": "system",
-                    "content": search_prompt,
+                    "content": system_prompt,
                 },
                 {"role": "user", "content": time_context + query + platform_prompt},
             ],
             "stream": True,
         }
 
-        await log_info(ctx, f"platform_prompt: { query + platform_prompt}", config.debug_enabled)
+        await log_info(
+            ctx,
+            (
+                f"search_profile: level={profile.level}, mode={profile.mode}, "
+                f"query_type={profile.query_type}, min_sources={profile.min_source_count}; "
+                f"query={query}{platform_prompt}"
+            ),
+            config.debug_enabled,
+        )
 
         return await self._execute_stream_with_retry(headers, payload, ctx)
 
