@@ -1,4 +1,7 @@
+import re
 import sys
+import unicodedata
+from hashlib import sha256
 from pathlib import Path
 
 # 支持直接运行：添加 src 目录到 Python 路径
@@ -17,14 +20,14 @@ try:
     from web_search.logger import log_info
     from web_search.config import config
     from web_search.sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
-    from web_search.planning import engine as planning_engine, _split_csv
+    from web_search.planning import PHASE_NAMES, PlanningSession, engine as planning_engine, _split_csv
 except ImportError:
     from .providers.grok import GrokSearchProvider
     from .providers.tavily import TavilyClient
     from .logger import log_info
     from .config import config
     from .sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
-    from .planning import engine as planning_engine, _split_csv
+    from .planning import PHASE_NAMES, PlanningSession, engine as planning_engine, _split_csv
 
 import asyncio
 
@@ -35,6 +38,14 @@ _AVAILABLE_MODELS_CACHE: dict[tuple[str, str], list[str]] = {}
 _AVAILABLE_MODELS_LOCK = asyncio.Lock()
 _TAVILY_CLIENT: TavilyClient | None = None
 _TAVILY_CLIENT_FINGERPRINT: tuple[str, tuple[str, ...], int] | None = None
+_PHASE_TO_TOOL_NAME = {
+    "intent_analysis": "plan_intent",
+    "complexity_assessment": "plan_complexity",
+    "query_decomposition": "plan_sub_query",
+    "search_strategy": "plan_search_term",
+    "tool_selection": "plan_tool_mapping",
+    "execution_order": "plan_execution",
+}
 
 
 def _get_tavily_client() -> TavilyClient:
@@ -165,6 +176,7 @@ def _build_web_search_response(
     error_code: str = "",
     error_message: str = "",
     retry_same_query: bool = False,
+    answer_ready: bool | None = None,
 ) -> dict:
     normalized_content = (content or "").strip()
     response = {
@@ -172,7 +184,7 @@ def _build_web_search_response(
         "content": normalized_content,
         "sources_count": len(sources),
         "status": status,
-        "answer_ready": status == "ok" and bool(normalized_content),
+        "answer_ready": answer_ready if answer_ready is not None else status == "ok" and bool(normalized_content),
     }
 
     preview = _build_sources_preview(sources)
@@ -189,34 +201,234 @@ def _build_web_search_response(
     return response
 
 
+def _build_sparse_search_fallback(sources: list[dict]) -> str:
+    preview = _build_sources_preview(sources)
+    if preview:
+        lines = [
+            "当前查询没有拿到足够完整的正文输出，但已经检索到一些可供核验的相关来源。",
+            "这通常说明主题较冷门、证据分散，或上游模型在证据不足时选择了保守输出。",
+            "",
+            "可先核验这些来源：",
+        ]
+        for item in preview:
+            label = item.get("title") or item["url"]
+            lines.append(f"- [{label}]({item['url']})")
+        lines.extend(
+            [
+                "",
+                "如果需要更完整的结论，建议缩小查询范围、补充实体名或时间范围，再继续搜索。",
+            ]
+        )
+        return "\n".join(lines)
+
+    return (
+        "当前查询未返回足够完整的正文。"
+        "这通常意味着主题较冷门、证据分散，或检索范围仍然过宽。"
+        "建议缩小查询范围、补充实体名或时间范围后再试。"
+    )
+
+
+def _missing_required_phases(session: PlanningSession) -> list[str]:
+    return [phase for phase in PHASE_NAMES if phase in session.required_phases() and phase not in session.phases]
+
+
+def _sanitize_context_token(value: str, max_len: int = 64) -> str:
+    cleaned = re.sub(r"[\x00-\x1f\x7f`]+", " ", value or "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len].rstrip()
+    return cleaned
+
+
+def _sanitize_context_id(value: str) -> str:
+    cleaned = _sanitize_context_token(value, max_len=32)
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]", "", cleaned)
+    return cleaned
+
+
+def _sanitize_search_term(value: str) -> str:
+    cleaned = _sanitize_context_token(value, max_len=80)
+    cleaned = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff\s\+\#\.\-\/:\?]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _build_planning_context_data(session: PlanningSession) -> dict:
+    plan = session.build_executable_plan()
+    data: dict = {"planning_session_id": session.session_id}
+    if session.complexity_level is not None:
+        data["complexity_level"] = session.complexity_level
+
+    intent = plan.get("intent_analysis")
+    if isinstance(intent, dict):
+        intent_data: dict = {}
+        query_type = (intent.get("query_type") or "").strip()
+        time_sensitivity = (intent.get("time_sensitivity") or "").strip()
+        if query_type:
+            intent_data["query_type"] = query_type
+        if time_sensitivity:
+            intent_data["time_sensitivity"] = time_sensitivity
+        if intent_data:
+            data["intent"] = intent_data
+
+    sub_queries = plan.get("query_decomposition")
+    if isinstance(sub_queries, list) and sub_queries:
+        prioritized_sub_queries: list[dict] = []
+        for item in sub_queries[:5]:
+            if not isinstance(item, dict):
+                continue
+            sub_id = _sanitize_context_id(item.get("id") or "")
+            if sub_id:
+                prioritized_sub_queries.append({"id": sub_id})
+        if prioritized_sub_queries:
+            data["sub_queries"] = prioritized_sub_queries
+
+    strategy = plan.get("search_strategy")
+    if isinstance(strategy, dict):
+        strategy_data: dict = {}
+        approach = (strategy.get("approach") or "").strip()
+        if approach:
+            strategy_data["approach"] = approach
+        search_terms = strategy.get("search_terms")
+        if isinstance(search_terms, list) and search_terms:
+            planned_terms: list[dict] = []
+            for item in search_terms[:6]:
+                if not isinstance(item, dict):
+                    continue
+                term = _sanitize_search_term(item.get("term") or "")
+                purpose = _sanitize_context_id(item.get("purpose") or "")
+                round_no = item.get("round")
+                if term and purpose:
+                    planned_terms.append({"term": term, "purpose": purpose, "round": round_no})
+            if planned_terms:
+                strategy_data["search_terms"] = planned_terms
+        if strategy_data:
+            data["search_strategy"] = strategy_data
+
+    tool_selection = plan.get("tool_selection")
+    if isinstance(tool_selection, list) and tool_selection:
+        tool_mapping: list[dict] = []
+        for item in tool_selection[:5]:
+            if not isinstance(item, dict):
+                continue
+            sub_query_id = _sanitize_context_id(item.get("sub_query_id") or "")
+            tool = (item.get("tool") or "").strip()
+            if sub_query_id and tool:
+                tool_mapping.append({"sub_query_id": sub_query_id, "tool": tool})
+        if tool_mapping:
+            data["tool_selection"] = tool_mapping
+
+    return data
+
+
+def _normalize_query_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text or "").casefold()
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    # Preserve semantically meaningful technical separators while tolerating
+    # incidental whitespace around them, e.g. "gpt - 4.1" == "gpt-4.1".
+    normalized = re.sub(r"(?<=\S)\s*([+#./:_-])\s*(?=\S)", r"\1", normalized)
+    return normalized
+
+
+def _query_fingerprint(text: str) -> str:
+    normalized = _normalize_query_text(text)
+    return sha256(normalized.encode("utf-8")).hexdigest() if normalized else ""
+
+
+def _planning_matches_query(session: PlanningSession, query: str) -> bool:
+    plan = session.build_executable_plan()
+    intent = plan.get("intent_analysis")
+    if not isinstance(intent, dict):
+        return False
+
+    query_fingerprint = _query_fingerprint(query)
+    if not query_fingerprint:
+        return False
+
+    planning_fingerprint = (intent.get("query_fingerprint") or "").strip()
+    if not planning_fingerprint:
+        return False
+
+    return query_fingerprint == planning_fingerprint
+
+
+def _validate_planning_session(planning_session_id: str, query: str) -> tuple[PlanningSession | None, str, str]:
+    normalized = (planning_session_id or "").strip()
+    if not normalized:
+        return None, "planning_required", "调用 web_search 前必须先调用 plan_intent，并传入 planning_session_id。"
+
+    session = planning_engine.get_session(normalized)
+    if session is None:
+        return None, "planning_session_not_found", f"planning_session_id 不存在或已过期: {normalized}"
+
+    if "intent_analysis" not in session.phases:
+        return session, "planning_incomplete", "规划会话缺少 intent_analysis，必须先完成 plan_intent。"
+
+    if session.complexity_level is None or "complexity_assessment" not in session.phases:
+        return session, "planning_incomplete", "规划会话缺少 complexity_assessment，必须先完成 plan_complexity。"
+
+    missing = _missing_required_phases(session)
+    if missing:
+        missing_tools = [_PHASE_TO_TOOL_NAME.get(phase, phase) for phase in missing]
+        return session, "planning_incomplete", "规划阶段未完成，缺少: " + ", ".join(missing_tools)
+
+    plan = session.build_executable_plan()
+    intent = plan.get("intent_analysis")
+    if not isinstance(intent, dict) or not (intent.get("query_fingerprint") or "").strip():
+        return session, "planning_unbound", "规划会话缺少 query 绑定信息，请重新调用 plan_intent 并传入 original_query。"
+
+    if not _planning_matches_query(session, query):
+        return session, "planning_query_mismatch", "planning_session_id 与当前 query 不匹配，请重新调用 plan_intent 生成新的规划会话。"
+
+    return session, "", ""
+
+
+WEB_SEARCH_DESCRIPTION = """
+Before using this tool, call `plan_intent` first to perform search planning, then pass the resulting `planning_session_id`. For level 1 queries, complete the required early planning phases before searching. For higher-complexity queries, complete the required planning flow before calling `web_search`.
+
+Performs a bounded multi-round web search workflow and returns a synthesized answer. It may use breadth-first exploration followed by depth-first follow-up when the query warrants it, but it must still converge instead of looping indefinitely.
+
+Returns:
+- session_id: string
+- content: string
+- sources_count: int
+- status: "ok" | "error"
+- answer_ready: bool
+- sources_preview: lightweight preview of up to 3 cached sources
+- error: object, only present when status is "error"
+
+Use get_sources only when the full cached source list is needed for citation or verification.
+If status is "error", treat it as a terminal result for this exact query. Do not repeat the same query verbatim; answer with the limitation or refine the query first.
+"""
+
+
 @mcp.tool(
     name="web_search",
     output_schema=None,
-    description="""
-    Performs one targeted web search and returns a synthesized answer.
-
-    Returns:
-    - session_id: string
-    - content: string
-    - sources_count: int
-    - status: "ok" | "error"
-    - answer_ready: bool
-    - sources_preview: lightweight preview of up to 3 cached sources
-    - error: object, only present when status is "error"
-
-    Use get_sources only when the full cached source list is needed for citation or verification.
-    If status is "error", do not repeat the same query verbatim; answer with the limitation or refine the query first.
-    """,
+    description=WEB_SEARCH_DESCRIPTION,
     meta={"version": "2.0.0", "author": "guda.studio"},
 )
 async def web_search(
     query: Annotated[str, "Clear, self-contained natural-language search query."],
+    planning_session_id: Annotated[str, "Session ID returned by plan_intent. web_search validates this plan before execution."],
     platform: Annotated[str, "Target platform to focus on (e.g., 'Twitter', 'GitHub', 'Reddit'). Leave empty for general web search."] = "",
     model: Annotated[str, "Optional model ID for this request only. This value is used ONLY when user explicitly provided."] = "",
     extra_sources: Annotated[int, "Number of additional reference results from Tavily/Firecrawl. Set 0 to disable. Default 0."] = 0,
     ctx: Context = None,
 ) -> dict:
     session_id = new_session_id()
+    planning_session, planning_error_code, planning_error_message = _validate_planning_session(planning_session_id, query)
+    if planning_error_code:
+        await _SOURCES_CACHE.set(session_id, [])
+        return _build_web_search_response(
+            session_id,
+            planning_error_message,
+            [],
+            status="error",
+            error_code=planning_error_code,
+            error_message=planning_error_message,
+        )
+
     try:
         api_url = config.grok_api_url
         api_key = config.grok_api_key
@@ -249,6 +461,7 @@ async def web_search(
         effective_model = model
 
     grok_provider = GrokSearchProvider(api_url, api_key, effective_model)
+    planning_context = _build_planning_context_data(planning_session)
 
     # 计算额外信源配额
     has_tavily = config.tavily_enabled and bool(config.tavily_api_keys)
@@ -279,7 +492,7 @@ async def web_search(
         except Exception:
             return None
 
-    coros: list = [grok_provider.search(query, platform)]
+    coros: list = [grok_provider.search(query, platform, ctx=ctx, planning_context=planning_context)]
     if tavily_count > 0:
         coros.append(_safe_tavily())
     if firecrawl_count > 0:
@@ -324,15 +537,13 @@ async def web_search(
         )
 
     if not answer.strip():
-        message = "搜索未返回可用答案正文"
+        message = "搜索未返回可用答案正文，已降级返回稀疏结果"
         await log_info(ctx, message, config.debug_enabled)
         return _build_web_search_response(
             session_id,
-            message,
+            _build_sparse_search_fallback(all_sources),
             all_sources,
-            status="error",
-            error_code="empty_answer",
-            error_message=message,
+            answer_ready=False,
         )
 
     return _build_web_search_response(session_id, answer, all_sources)
@@ -759,6 +970,7 @@ async def toggle_builtin_tools(
 )
 async def plan_intent(
     thought: Annotated[str, "Reasoning for this phase"],
+    original_query: Annotated[str, "Original user query before distillation; required to bind this planning session to web_search."],
     core_question: Annotated[str, "Distilled core question in one sentence"],
     query_type: Annotated[str, "factual | comparative | exploratory | analytical"],
     time_sensitivity: Annotated[str, "realtime | recent | historical | irrelevant"],
@@ -771,7 +983,14 @@ async def plan_intent(
     is_revision: Annotated[bool, "True to overwrite existing intent"] = False,
 ) -> str:
     import json
-    data = {"core_question": core_question, "query_type": query_type, "time_sensitivity": time_sensitivity}
+    if not original_query.strip():
+        return json.dumps({"error": "original_query is required and cannot be blank."}, ensure_ascii=False, indent=2)
+    data = {
+        "core_question": core_question,
+        "query_type": query_type,
+        "time_sensitivity": time_sensitivity,
+        "query_fingerprint": _query_fingerprint(original_query),
+    }
     if domain:
         data["domain"] = domain
     if premise_valid is not None:
