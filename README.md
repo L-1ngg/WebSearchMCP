@@ -203,16 +203,24 @@ claude mcp list
 
 ### `web_search` — AI 网络搜索
 
-通过 Grok API 执行一次定向网络搜索，返回可直接用于回答用户的正文，并返回 `session_id` 以便后续获取信源。
+调用前应先使用 `plan_intent` 完成搜索规划。`web_search` 会执行有边界的多轮搜索流程：需要时先做 breadth-first 式广度探索，再对最关键分支做 depth-first 式深入搜索，最后返回可直接用于回答用户的正文，以及 `session_id` 供后续获取信源。
+
+`planning_session_id` 会与 `plan_intent.original_query` 做严格绑定校验。绑定基于“弱归一化 + 精确哈希”：
+- 忽略大小写、重复空格和技术符号两侧的偶发空格
+- 保留技术语义符号，如 `C#`、`C++`、`ASP.NET`、`gpt-4.1`
+- 因此旧规划不能复用于不同 query，技术符号不同的 query 也不会被误判为同一个问题
 
 `web_search` 输出不展开信源，仅返回 `sources_count`；信源会按 `session_id` 缓存在服务端，可用 `get_sources` 拉取。
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
+| `planning_session_id` | string | ✅ | - | `plan_intent` 返回的会话 ID，`web_search` 会先校验该规划会话 |
 | `query` | string | ✅ | - | 搜索查询语句 |
 | `platform` | string | ❌ | `""` | 聚焦平台（如 `"Twitter"`, `"GitHub, Reddit"`） |
 | `model` | string | ❌ | `null` | 按次指定 Grok 模型 ID |
 | `extra_sources` | int | ❌ | `0` | 额外补充信源数量（Tavily/Firecrawl，可为 0 关闭） |
+
+`plan_intent` 调用时必须传入原始用户问题到 `original_query`，否则该规划会话无法用于后续 `web_search`。
 
 自动检测查询中的时间相关关键词（如"最新""今天""recent"等），注入本地时间上下文以提升时效性搜索的准确度。
 
@@ -225,6 +233,27 @@ claude mcp list
 - `answer_ready`: 当前 `content` 是否可直接用于回答用户
 - `sources_preview`: 最多 3 条轻量信源预览
 - `error`: 仅在 `status=error` 时出现，包含错误码与是否建议原样重试
+
+当 `status=error` 时，应将其视为该查询的终止结果，不要对同一查询原样重复调用，应改为向用户说明限制或先重写查询。
+
+### Planning Workflow
+
+推荐的最小调用顺序如下：
+
+1. 调用 `plan_intent`
+   必须传入 `original_query`（原始用户问题）以及蒸馏后的 `core_question`
+2. 调用 `plan_complexity`
+   先确定复杂度等级，服务端据此决定后续必须完成哪些 phase
+3. 按复杂度补齐剩余 phase
+   - Level 1: 至少完成 `plan_sub_query`
+   - Level 2: 还需完成 `plan_search_term`、`plan_tool_mapping`
+   - Level 3: 还需完成 `plan_execution`
+4. 调用 `web_search`
+   传入原始 `query` 和上一步得到的 `planning_session_id`
+
+调用约束：
+- `query` 必须与 `plan_intent.original_query` 严格绑定，旧 planning 不能复用到新 query
+- `web_search` 只消费通过校验的规划会话；规划不完整、query 不匹配或缺少绑定信息时会直接报错
 
 ### `get_sources` — 获取信源
 

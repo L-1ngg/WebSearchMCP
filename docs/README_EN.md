@@ -186,16 +186,24 @@ This will automatically modify the **project-level** `.claude/settings.json` `pe
 
 ### `web_search` — AI Web Search
 
-Executes one targeted web search via Grok API. It returns answer text suitable for responding to the user plus a `session_id` for retrieving sources later.
+Call `plan_intent` first before using this tool. `web_search` performs a bounded multi-round search workflow: it can use breadth-first exploration for recall and depth-first follow-up on the most important branches before returning answer text suitable for responding to the user, plus a `session_id` for retrieving sources later.
+
+`planning_session_id` is strictly bound to `plan_intent.original_query` using weak normalization plus exact hashing:
+- Ignores case, repeated whitespace, and incidental spaces around technical separators
+- Preserves semantically meaningful technical symbols such as `C#`, `C++`, `ASP.NET`, and `gpt-4.1`
+- As a result, an old plan cannot be reused for a different query, and symbol-sensitive technical queries will not be treated as the same question
 
 `web_search` does not expand sources in the response; it only returns `sources_count`. Sources are cached server-side by `session_id` and can be fetched with `get_sources`.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
+| `planning_session_id` | string | Yes | - | Session ID returned by `plan_intent`; `web_search` validates this planning session before execution |
 | `query` | string | Yes | - | Search query |
 | `platform` | string | No | `""` | Focus platform (e.g., `"Twitter"`, `"GitHub, Reddit"`) |
 | `model` | string | No | `null` | Per-request Grok model ID |
 | `extra_sources` | int | No | `0` | Extra sources via Tavily/Firecrawl (0 disables) |
+
+When calling `plan_intent`, you must pass the original user request in `original_query`; otherwise the resulting planning session cannot be used by `web_search`.
 
 Automatically detects time-related keywords in queries (e.g., "latest", "today", "recent"), injecting local time context to improve accuracy for time-sensitive searches.
 
@@ -207,6 +215,27 @@ Return value (structured dict):
 - `answer_ready`: whether `content` is suitable for directly answering the user
 - `sources_preview`: up to 3 lightweight cached source previews
 - `error`: present only when `status=error`, including an error code and whether retrying the exact same query is advised
+
+When `status=error`, treat it as a terminal outcome for that exact query. Do not repeat the same query verbatim; either explain the limitation or refine the query first.
+
+### Planning Workflow
+
+The recommended minimum call sequence is:
+
+1. Call `plan_intent`
+   You must provide `original_query` (the raw user request) and the distilled `core_question`
+2. Call `plan_complexity`
+   This determines the complexity level, which in turn decides which later phases are required
+3. Complete the remaining required phases based on complexity
+   - Level 1: at least `plan_sub_query`
+   - Level 2: also requires `plan_search_term` and `plan_tool_mapping`
+   - Level 3: also requires `plan_execution`
+4. Call `web_search`
+   Pass the original `query` together with the resulting `planning_session_id`
+
+Execution constraints:
+- `query` must remain strictly bound to `plan_intent.original_query`; an old plan cannot be reused for a different query
+- `web_search` only consumes validated planning sessions; incomplete plans, mismatched queries, or missing binding data fail fast
 
 ### `get_sources` — Retrieve Sources
 

@@ -5,6 +5,10 @@ import uuid
 
 class IntentOutput(BaseModel):
     core_question: str = Field(description="Distilled core question in one sentence")
+    query_fingerprint: Optional[str] = Field(
+        default=None,
+        description="Server-computed fingerprint binding this planning session to the original user query."
+    )
     query_type: Literal["factual", "comparative", "exploratory", "analytical"] = Field(
         description="factual=single answer, comparative=A vs B, exploratory=broad understanding, analytical=deep reasoning"
     )
