@@ -73,12 +73,12 @@ GROK_API_URL=
 GROK_API_KEY=
 GROK_MODEL=grok-4.20-beta
 TAVILY_API_URL=https://api.tavily.com
-TAVILY_API_URLS=["xxx","xxx","xxxx"]
+TAVILY_API_KEYS=["tvly-key-1","tvly-key-2","tvly-key-3"]
 TAVILY_ENABLED=true
 GROK_DEBUG=false
 GROK_LOG_LEVEL=INFO
 ```
-这里没有配置 `TAVILY_API_URLS` 的原因是我在.env文件里配置的，其余的配置项也可以写在.env文件里
+这里没有配置 `TAVILY_API_KEYS` 的原因是我在.env文件里配置的，其余的配置项也可以写在.env文件里
 
 ## 二、安装
 
