@@ -32,7 +32,7 @@ Grok Search MCP 是一个基于 [FastMCP](https://github.com/jlowin/fastmcp) 构
 - **多 Tavily Key 支持**：支持通过 `TAVILY_API_KEYS` 配置多个 Tavily API Key，并在单个 Key 失败后按冷却时间自动轮换。
 - **Tavily 调用统一封装**：将 Tavily 的 `search`、`extract`、`map` 调用统一收敛到客户端中，复用同一套 Key 选择、失败冷却与错误处理逻辑。
 - **多 Key 场景兼容修正**：额外信源补充、网页抓取与站点映射等 Tavily 相关能力，改为基于多 Key 配置判断可用性，使 `TAVILY_API_KEYS` 场景下能够正常工作。
-- **配置诊断信息补充**：`get_config_info` 会额外展示已加载的 env 文件列表以及 Tavily Key 数量，便于排查配置来源与多 Key 状态。
+- **配置诊断信息补充**：`get_config_info` 会额外展示已加载的 env 文件列表以及 Tavily Key 数量，便于排查配置来源与多 Key 状态；默认不会主动联网，只有显式启用时才测试 Grok `/models` 连通性。
 
 ```
 Claude ──MCP──► Grok Search Server
@@ -203,24 +203,32 @@ claude mcp list
 
 ### `web_search` — AI 网络搜索
 
-调用前应先使用 `plan_intent` 完成搜索规划。`web_search` 会执行有边界的多轮搜索流程：需要时先做 breadth-first 式广度探索，再对最关键分支做 depth-first 式深入搜索，最后返回可直接用于回答用户的正文，以及 `session_id` 供后续获取信源。
+默认可直接调用 `web_search`。服务端会基于 query 自动选择内建的 bounded search strategy：简单问题偏 direct，复杂问题会在受控范围内做 breadth-first 式广度探索，再对关键分支做 depth-first 式深入搜索，最后返回可直接用于回答用户的正文，以及 `session_id` 供后续获取信源。
 
-`planning_session_id` 会与 `plan_intent.original_query` 做严格绑定校验。绑定基于“弱归一化 + 精确哈希”：
-- 忽略大小写、重复空格和技术符号两侧的偶发空格
-- 保留技术语义符号，如 `C#`、`C++`、`ASP.NET`、`gpt-4.1`
-- 因此旧规划不能复用于不同 query，技术符号不同的 query 也不会被误判为同一个问题
+对于复杂搜索或上层 agent 需要预先规划的场景，也可以额外传入 `planning_session_id`。若提供了规划会话，服务端会尝试将其作为参考上下文使用；是否强制校验由 `planning_mode` 控制。
 
 `web_search` 输出不展开信源，仅返回 `sources_count`；信源会按 `session_id` 缓存在服务端，可用 `get_sources` 拉取。
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| `planning_session_id` | string | ✅ | - | `plan_intent` 返回的会话 ID，`web_search` 会先校验该规划会话 |
 | `query` | string | ✅ | - | 搜索查询语句 |
+| `planning_session_id` | string | ❌ | `""` | 可选的规划会话 ID；若提供，服务端会按 `planning_mode` 决定是否应用 |
+| `planning_mode` | string | ❌ | `"auto"` | `auto` 尝试应用合法 planning，非法 planning 会忽略并继续搜索；`require` 强制 planning 合法；`ignore` 完全忽略 planning |
 | `platform` | string | ❌ | `""` | 聚焦平台（如 `"Twitter"`, `"GitHub, Reddit"`） |
 | `model` | string | ❌ | `null` | 按次指定 Grok 模型 ID |
+| `search_prompt` | string | ❌ | `""` | 调用方自定义的搜索策略 Prompt，可控制搜索深度、信源偏好与回答风格；服务端仍保留内建安全护栏与固定格式子任务 Prompt |
+| `source_preference` | string | ❌ | `"auto"` | 结构化信源偏好：`auto` / `official` / `community` / `news` / `academic` |
+| `answer_style` | string | ❌ | `"auto"` | 结构化回答风格：`auto` / `concise` / `detailed` / `bullet_summary` |
+| `search_depth` | string | ❌ | `"auto"` | 结构化搜索深度：`auto` / `direct` / `balanced` / `deep` |
 | `extra_sources` | int | ❌ | `0` | 额外补充信源数量（Tavily/Firecrawl，可为 0 关闭） |
 
-`plan_intent` 调用时必须传入原始用户问题到 `original_query`，否则该规划会话无法用于后续 `web_search`。
+若上层调用方希望自己编排搜索主 Prompt，可传入 `search_prompt`；该参数只覆盖主搜索策略，不影响 `web_fetch` / `describe_url` / `rank_sources` 等底层固定任务 Prompt。若未传入，服务端会回退到默认的 bounded search strategy。
+
+若不想自己写整段 Prompt，也可以只传结构化参数：
+
+- `source_preference=official`：优先官方文档、厂商说明、第一方公告
+- `answer_style=bullet_summary`：倾向输出简短要点列表
+- `search_depth=deep`：倾向先广后深地做更充分搜索
 
 自动检测查询中的时间相关关键词（如"最新""今天""recent"等），注入本地时间上下文以提升时效性搜索的准确度。
 
@@ -231,14 +239,22 @@ claude mcp list
 - `sources_count`: 已缓存的信源数量
 - `status`: `ok` / `error`
 - `answer_ready`: 当前 `content` 是否可直接用于回答用户
+- `used_custom_search_prompt`: 是否使用了调用方自定义 `search_prompt`
+- `planning_applied`: 本次搜索是否实际应用了 planning 上下文
+- `planning_status`: planning 的处理结果，例如 `not_provided` / `applied` / `ignored_*`
 - `sources_preview`: 最多 3 条轻量信源预览
+- `warnings`: 可选警告列表，例如在 `planning_mode=auto` 下忽略了无效 planning
 - `error`: 仅在 `status=error` 时出现，包含错误码与是否建议原样重试
 
 当 `status=error` 时，应将其视为该查询的终止结果，不要对同一查询原样重复调用，应改为向用户说明限制或先重写查询。
 
-### Planning Workflow
+若 `planning_mode=auto` 且提供的 planning 无法通过校验，服务端会忽略该 planning 并继续执行默认搜索，同时在 `planning_status` / `warnings` 中说明原因；只有 `planning_mode=require` 时才会将 planning 错误视为终止条件。
 
-推荐的最小调用顺序如下：
+### Advanced Planning Workflow
+
+默认调用 `web_search` 时无需先做 planning。以下流程仅适用于复杂搜索、上层 agent 需要事先规划搜索路径，或调用方希望在 `planning_mode=require` 下显式约束搜索行为的场景。
+
+推荐调用顺序如下：
 
 1. 调用 `plan_intent`
    必须传入 `original_query`（原始用户问题）以及蒸馏后的 `core_question`
@@ -249,11 +265,12 @@ claude mcp list
    - Level 2: 还需完成 `plan_search_term`、`plan_tool_mapping`
    - Level 3: 还需完成 `plan_execution`
 4. 调用 `web_search`
-   传入原始 `query` 和上一步得到的 `planning_session_id`
+   传入原始 `query`、上一步得到的 `planning_session_id`，并根据需要设置 `planning_mode`
 
 调用约束：
 - `query` 必须与 `plan_intent.original_query` 严格绑定，旧 planning 不能复用到新 query
-- `web_search` 只消费通过校验的规划会话；规划不完整、query 不匹配或缺少绑定信息时会直接报错
+- `planning_mode=auto` 时，未通过校验的 planning 会被忽略并继续使用默认搜索策略
+- `planning_mode=require` 时，规划不完整、query 不匹配或缺少绑定信息会直接报错
 
 ### `get_sources` — 获取信源
 
@@ -292,7 +309,17 @@ claude mcp list
 
 ### `get_config_info` — 配置诊断
 
-无需参数。显示所有配置状态、测试 Grok API 连接、返回响应时间和可用模型列表（API Key 自动脱敏）。
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `include_connection_test` | bool | ❌ | `false` | 是否显式探测 Grok `/models` 端点；默认关闭，避免把“查看配置”变成依赖网络的操作 |
+
+默认零参数调用 `get_config_info()` 仍然有效，会返回结构化对象并保留原有顶层诊断字段（如 `GROK_API_URL`、`GROK_MODEL`、`config_status`、`connection_test`），同时新增：
+
+- `status`：整体结果，`ok` / `error`
+- `config`：配置快照的嵌套对象副本，方便外部调用方稳定读取
+- `error`：仅在配置快照采集失败时出现，说明失败原因
+
+默认情况下 `connection_test.status` 为 `skipped`，不会主动请求网络。只有传入 `include_connection_test=true` 时，工具才会探测 Grok `/models` 端点，并返回响应时间与 `available_models`。
 
 ### `switch_model` — 模型切换
 
@@ -336,7 +363,7 @@ A: 需要 OpenAI 兼容格式的 API 地址（支持 `/chat/completions` 和 `/m
 <summary>
 Q: 如何验证配置？
 </summary>
-A: 在 Claude 对话中说"显示 web-search 配置信息"，将自动测试 API 连接并显示结果。
+A: 在 Claude 对话中说"显示 web-search 配置信息"，默认会返回本地配置诊断而不主动联网。若需要显式验证 Grok API 连通性，请调用 `get_config_info(include_connection_test=true)`。
 </details>
 
 ## 许可证

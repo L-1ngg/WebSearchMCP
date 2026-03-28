@@ -139,6 +139,10 @@ class GrokSearchProvider(BaseSearchProvider):
         max_results: int = 10,
         ctx=None,
         planning_context: Optional[dict] = None,
+        search_prompt: str = "",
+        source_preference: str = "auto",
+        answer_style: str = "auto",
+        search_depth: str = "auto",
     ) -> List[SearchResult]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -151,7 +155,13 @@ class GrokSearchProvider(BaseSearchProvider):
             platform_prompt = "\n\nYou should search the web for the information you need, and focus on these platform: " + platform + "\n"
 
         time_context = get_local_time_info() + "\n" if _needs_time_context(query) else ""
-        system_prompt = build_search_prompt(query)
+        system_prompt = build_search_prompt(
+            query,
+            caller_prompt=search_prompt,
+            source_preference=source_preference,
+            answer_style=answer_style,
+            search_depth=search_depth,
+        )
         messages = [
             {
                 "role": "system",
@@ -185,6 +195,10 @@ class GrokSearchProvider(BaseSearchProvider):
             (
                 f"search_profile: level={profile.level}, mode={profile.mode}, "
                 f"query_type={profile.query_type}, preferred_sources={profile.preferred_source_count}; "
+                f"custom_prompt={'yes' if search_prompt.strip() else 'no'}; "
+                f"source_preference={source_preference}; "
+                f"answer_style={answer_style}; "
+                f"search_depth={search_depth}; "
                 f"query={query}{platform_prompt}"
             ),
             config.debug_enabled,

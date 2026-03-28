@@ -31,7 +31,7 @@ While keeping the original core capabilities, this fork mainly adds the followin
 - **Multiple Tavily key support**: supports configuring multiple Tavily API keys through `TAVILY_API_KEYS`, with automatic rotation after a key enters cooldown on failure.
 - **Unified Tavily client wrapper**: consolidates Tavily `search`, `extract`, and `map` calls behind one client so the same key selection, cooldown, and error-handling logic is reused.
 - **Multi-key compatibility fixes**: Tavily-dependent features such as extra source retrieval, page fetch, and site map now determine availability from the multi-key configuration, so `TAVILY_API_KEYS` setups work correctly.
-- **Expanded config diagnostics**: `get_config_info` also reports loaded env files and the Tavily key count, making configuration troubleshooting easier.
+- **Expanded config diagnostics**: `get_config_info` also reports loaded env files and the Tavily key count, making configuration troubleshooting easier; it stays local by default and only probes Grok `/models` when explicitly requested.
 
 ```
 Claude --MCP--> Grok Search Server
@@ -186,24 +186,32 @@ This will automatically modify the **project-level** `.claude/settings.json` `pe
 
 ### `web_search` — AI Web Search
 
-Call `plan_intent` first before using this tool. `web_search` performs a bounded multi-round search workflow: it can use breadth-first exploration for recall and depth-first follow-up on the most important branches before returning answer text suitable for responding to the user, plus a `session_id` for retrieving sources later.
+By default, you can call `web_search` directly. The server chooses a bounded internal search strategy based on the query itself: simple queries stay direct, while more complex ones may use breadth-first exploration for recall and depth-first follow-up on the most important branches before returning answer text suitable for the user, plus a `session_id` for retrieving sources later.
 
-`planning_session_id` is strictly bound to `plan_intent.original_query` using weak normalization plus exact hashing:
-- Ignores case, repeated whitespace, and incidental spaces around technical separators
-- Preserves semantically meaningful technical symbols such as `C#`, `C++`, `ASP.NET`, and `gpt-4.1`
-- As a result, an old plan cannot be reused for a different query, and symbol-sensitive technical queries will not be treated as the same question
+For complex searches or higher-level agents that want explicit search planning, you can additionally provide `planning_session_id`. When a planning session is present, the server will try to use it as reference context; whether validation is enforced depends on `planning_mode`.
 
 `web_search` does not expand sources in the response; it only returns `sources_count`. Sources are cached server-side by `session_id` and can be fetched with `get_sources`.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `planning_session_id` | string | Yes | - | Session ID returned by `plan_intent`; `web_search` validates this planning session before execution |
 | `query` | string | Yes | - | Search query |
+| `planning_session_id` | string | No | `""` | Optional planning session ID; when provided, the server decides whether to apply it based on `planning_mode` |
+| `planning_mode` | string | No | `"auto"` | `auto` applies valid planning and ignores invalid planning with warnings; `require` enforces valid planning; `ignore` skips planning entirely |
 | `platform` | string | No | `""` | Focus platform (e.g., `"Twitter"`, `"GitHub, Reddit"`) |
 | `model` | string | No | `null` | Per-request Grok model ID |
+| `search_prompt` | string | No | `""` | Caller-authored search strategy prompt for search depth, source preference, and answer style. Server-side guardrails and fixed-format helper prompts remain enforced |
+| `source_preference` | string | No | `"auto"` | Structured source preference: `auto` / `official` / `community` / `news` / `academic` |
+| `answer_style` | string | No | `"auto"` | Structured answer style: `auto` / `concise` / `detailed` / `bullet_summary` |
+| `search_depth` | string | No | `"auto"` | Structured search depth: `auto` / `direct` / `balanced` / `deep` |
 | `extra_sources` | int | No | `0` | Extra sources via Tavily/Firecrawl (0 disables) |
 
-When calling `plan_intent`, you must pass the original user request in `original_query`; otherwise the resulting planning session cannot be used by `web_search`.
+If the calling agent wants to author its own main search prompt, pass `search_prompt`. This only overrides the main search strategy and does not affect fixed lower-level prompts such as `web_fetch`, `describe_url`, or `rank_sources`. If omitted, the server falls back to its default bounded search strategy.
+
+If you do not want to write a full prompt, you can steer behavior with structured controls instead:
+
+- `source_preference=official`: prefer first-party docs, vendor references, and official announcements
+- `answer_style=bullet_summary`: bias toward short bullet-led answers
+- `search_depth=deep`: bias toward broader exploration before targeted drill-down
 
 Automatically detects time-related keywords in queries (e.g., "latest", "today", "recent"), injecting local time context to improve accuracy for time-sensitive searches.
 
@@ -213,14 +221,22 @@ Return value (structured dict):
 - `sources_count`: cached sources count
 - `status`: `ok` / `error`
 - `answer_ready`: whether `content` is suitable for directly answering the user
+- `used_custom_search_prompt`: whether a caller-authored `search_prompt` was used
+- `planning_applied`: whether planning context was actually applied
+- `planning_status`: planning handling status, such as `not_provided` / `applied` / `ignored_*`
 - `sources_preview`: up to 3 lightweight cached source previews
+- `warnings`: optional warning list, for example when invalid planning was ignored in `planning_mode=auto`
 - `error`: present only when `status=error`, including an error code and whether retrying the exact same query is advised
 
 When `status=error`, treat it as a terminal outcome for that exact query. Do not repeat the same query verbatim; either explain the limitation or refine the query first.
 
-### Planning Workflow
+If `planning_mode=auto` and the supplied planning fails validation, the server ignores the planning and continues with its default search strategy while reporting the reason in `planning_status` / `warnings`. Only `planning_mode=require` turns planning validation failures into terminal errors.
 
-The recommended minimum call sequence is:
+### Advanced Planning Workflow
+
+You do not need planning for normal `web_search` calls. The workflow below is only for complex searches, pre-planned agent flows, or callers that want strict planning enforcement with `planning_mode=require`.
+
+The recommended call sequence is:
 
 1. Call `plan_intent`
    You must provide `original_query` (the raw user request) and the distilled `core_question`
@@ -231,11 +247,12 @@ The recommended minimum call sequence is:
    - Level 2: also requires `plan_search_term` and `plan_tool_mapping`
    - Level 3: also requires `plan_execution`
 4. Call `web_search`
-   Pass the original `query` together with the resulting `planning_session_id`
+   Pass the original `query`, the resulting `planning_session_id`, and set `planning_mode` as needed
 
 Execution constraints:
 - `query` must remain strictly bound to `plan_intent.original_query`; an old plan cannot be reused for a different query
-- `web_search` only consumes validated planning sessions; incomplete plans, mismatched queries, or missing binding data fail fast
+- In `planning_mode=auto`, invalid planning is ignored and the default search path continues
+- In `planning_mode=require`, incomplete plans, mismatched queries, or missing binding data fail fast
 
 ### `get_sources` — Retrieve Sources
 
@@ -273,7 +290,17 @@ Traverses website structure via Tavily Map API, discovering URLs and generating 
 
 ### `get_config_info` — Configuration Diagnostics
 
-No parameters required. Displays all configuration status, tests Grok API connection, returns response time and available model list (API keys auto-masked).
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `include_connection_test` | bool | No | `false` | Explicitly probe the Grok `/models` endpoint. Disabled by default so config inspection does not depend on network availability |
+
+Legacy no-argument `get_config_info()` calls remain valid. The tool now returns a structured object while preserving the previous top-level diagnostic fields such as `GROK_API_URL`, `GROK_MODEL`, `config_status`, and `connection_test`. It also adds:
+
+- `status`: overall result, `ok` / `error`
+- `config`: nested copy of the configuration snapshot for stable machine consumption
+- `error`: present only when configuration snapshot gathering fails
+
+By default, `connection_test.status` is `skipped` and no network call is made. Pass `include_connection_test=true` to run the Grok `/models` probe and receive response timing plus `available_models`.
 
 ### `switch_model` — Model Switching
 
@@ -316,7 +343,7 @@ A: An OpenAI-compatible API endpoint (supporting `/chat/completions` and `/model
 <summary>
 Q: How to verify configuration?
 </summary>
-A: Say "Show web-search configuration info" in a Claude conversation to automatically test the API connection and display results.
+A: Say "Show web-search configuration info" in a Claude conversation to inspect local diagnostics without making a network call. If you want to explicitly validate Grok API connectivity, call `get_config_info(include_connection_test=true)`.
 </details>
 
 ## License

@@ -310,35 +310,11 @@ def classify_query_complexity(query: str) -> SearchPromptProfile:
     )
 
 
-def build_search_prompt(query: str) -> str:
-    profile = classify_query_complexity(query)
-    source_section_max = max(3, profile.preferred_source_count + 2)
-
-    return f"""
+def _build_search_contract_prompt() -> str:
+    return """
 # Objective
 
-Use web search to answer the current query with a bounded multi-round strategy. Recover breadth-first exploration when it improves recall, then use depth-first follow-up only where it materially improves the answer. Always converge to a final answer instead of searching indefinitely.
-
----
-
-# Complexity Profile
-
-- Complexity Level: {profile.level} ({profile.mode})
-- Query Type: {profile.query_type}
-- Preferred Source Target: {profile.preferred_source_count}
-- Search Rounds: {profile.search_round_guidance}
-- Depth Guidance: {profile.depth_guidance}
-- Stop Rule: {profile.stop_rule}
-
----
-
-# Bounded BFS/DFS Workflow
-
-1. Before drafting any answer, always validate the query framing, key entities, and time scope with an initial search round.
-2. For level 1 queries, keep the workflow narrow and verification-oriented. One direct search plus one targeted follow-up is usually enough.
-3. For level 2 queries, use bounded breadth-first exploration first, then depth-first follow-up on the most promising 1-2 threads only when they close a material gap.
-4. For level 3 queries, use breadth-first exploration to map the space before depth-first follow-up on the top 2 decision-relevant threads.
-5. If a new search round does not add meaningful evidence, stop instead of expanding the search tree further.
+Answer the current query directly with the server's default internal strategy. Use bounded search only as needed, and always converge to a final answer instead of searching indefinitely.
 
 ---
 
@@ -363,8 +339,115 @@ Use web search to answer the current query with a bounded multi-round strategy. 
 1. Return a complete final answer in polished Markdown.
 2. Lead with the direct answer, then add brief supporting detail only when helpful.
 3. Keep the answer concise and decision-oriented.
-4. End with a short `Sources` section containing up to {source_section_max} relevant URLs or Markdown links when available. Fewer sources are acceptable when coverage is limited.
+4. End with a short `Sources` section when relevant URLs are available.
 """.strip()
+
+
+def _build_structured_search_controls(
+    source_preference: str = "auto",
+    answer_style: str = "auto",
+    search_depth: str = "auto",
+) -> str:
+    lines: list[str] = []
+
+    if source_preference == "official":
+        lines.append("- Prioritize official documentation, vendor references, and first-party announcements before secondary commentary.")
+    elif source_preference == "community":
+        lines.append("- Prefer strong practitioner sources and community discussions, but validate critical claims against primary references when available.")
+    elif source_preference == "news":
+        lines.append("- Prioritize recent reporting, official statements, and date-sensitive coverage. Compare publish dates carefully.")
+    elif source_preference == "academic":
+        lines.append("- Prefer papers, benchmarks, datasets, and other primary technical publications over summaries and commentary.")
+
+    if answer_style == "concise":
+        lines.append("- Keep the answer brief and direct, using the minimum detail needed to support the conclusion.")
+    elif answer_style == "detailed":
+        lines.append("- Provide a fuller explanation with key caveats, tradeoffs, and supporting detail when it materially helps the user.")
+    elif answer_style == "bullet_summary":
+        lines.append("- Format the answer as short bullets with the conclusion first.")
+
+    if search_depth == "direct":
+        lines.append("- Use a direct search process: run narrowly targeted verification searches and stop once the answer is well-supported.")
+    elif search_depth == "balanced":
+        lines.append("- Use a balanced search process: start with a quick orientation pass, then run limited follow-up searches only if needed.")
+    elif search_depth == "deep":
+        lines.append("- Use a deeper search process: map the major dimensions first, then run targeted follow-up searches on the top decision-relevant branches.")
+
+    if not lines:
+        return ""
+
+    return "\n".join(
+        [
+            "# Structured Search Controls",
+            "",
+            "Apply these caller-provided search controls unless they conflict with the non-negotiable rules above.",
+            "",
+            *lines,
+        ]
+    )
+
+
+def _join_prompt_sections(*sections: str) -> str:
+    return "\n\n---\n\n".join(section.strip() for section in sections if section and section.strip())
+
+
+def build_search_prompt(
+    query: str,
+    caller_prompt: str = "",
+    source_preference: str = "auto",
+    answer_style: str = "auto",
+    search_depth: str = "auto",
+) -> str:
+    profile = classify_query_complexity(query)
+    source_section_max = max(3, profile.preferred_source_count + 2)
+    caller_prompt = (caller_prompt or "").strip()
+    controls_section = _build_structured_search_controls(
+        source_preference=source_preference,
+        answer_style=answer_style,
+        search_depth=search_depth,
+    )
+
+    if caller_prompt:
+        return _join_prompt_sections(
+            _build_search_contract_prompt(),
+            controls_section,
+            f"""
+# Caller Search Strategy
+
+Use the caller-authored instructions below as an overlay on top of the server's non-negotiable guardrails. Follow them unless they conflict with the rules above.
+
+{caller_prompt}
+""",
+        )
+
+    return _join_prompt_sections(
+        _build_search_contract_prompt(),
+        controls_section,
+        f"""
+# Internal Complexity Calibration
+
+- Complexity Level: {profile.level} ({profile.mode})
+- Query Type: {profile.query_type}
+- Preferred Source Target: {profile.preferred_source_count}
+- Search Rounds: {profile.search_round_guidance}
+- Depth Guidance: {profile.depth_guidance}
+- Stop Rule: {profile.stop_rule}
+""",
+        """
+# Bounded BFS/DFS Workflow
+
+1. Start with the most direct path to the answer. Before drafting any answer, validate the query framing, key entities, and time scope with an initial search round.
+2. For level 1 queries, keep the workflow narrow and verification-oriented. One direct search plus one targeted follow-up is usually enough.
+3. For level 2 queries, after the direct pass, use bounded breadth-first exploration first, then depth-first follow-up on the most promising 1-2 threads only when they close a material gap.
+4. For level 3 queries, after the direct pass, use bounded breadth-first exploration to map the space before depth-first follow-up on the top 2 decision-relevant threads.
+5. If a new search round does not add meaningful evidence, stop instead of expanding the search tree further.
+""",
+        f"""
+# Default Source Guidance
+
+End with a short `Sources` section containing up to {source_section_max} relevant URLs or Markdown links when available. Fewer sources are acceptable when coverage is limited.
+""",
+    )
 
 
 search_prompt = build_search_prompt("")

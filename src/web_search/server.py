@@ -10,7 +10,7 @@ if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
 from fastmcp import FastMCP, Context
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 from pydantic import Field
 
 # 尝试使用绝对导入（支持 mcp run）
@@ -177,6 +177,10 @@ def _build_web_search_response(
     error_message: str = "",
     retry_same_query: bool = False,
     answer_ready: bool | None = None,
+    used_custom_search_prompt: bool = False,
+    planning_applied: bool = False,
+    planning_status: str = "not_provided",
+    warnings: list[str] | None = None,
 ) -> dict:
     normalized_content = (content or "").strip()
     response = {
@@ -185,11 +189,17 @@ def _build_web_search_response(
         "sources_count": len(sources),
         "status": status,
         "answer_ready": answer_ready if answer_ready is not None else status == "ok" and bool(normalized_content),
+        "used_custom_search_prompt": used_custom_search_prompt,
+        "planning_applied": planning_applied,
+        "planning_status": planning_status,
     }
 
     preview = _build_sources_preview(sources)
     if preview:
         response["sources_preview"] = preview
+
+    if warnings:
+        response["warnings"] = warnings
 
     if status != "ok":
         response["error"] = {
@@ -352,41 +362,103 @@ def _planning_matches_query(session: PlanningSession, query: str) -> bool:
     return query_fingerprint == planning_fingerprint
 
 
-def _validate_planning_session(planning_session_id: str, query: str) -> tuple[PlanningSession | None, str, str]:
+def _resolve_planning_context(
+    planning_session_id: str,
+    query: str,
+    planning_mode: Literal["auto", "require", "ignore"],
+) -> tuple[dict | None, str, list[str], str, str]:
     normalized = (planning_session_id or "").strip()
+    warnings: list[str] = []
+
+    if planning_mode == "ignore":
+        if normalized:
+            return None, "ignored_by_mode", warnings, "", ""
+        return None, "not_provided", warnings, "", ""
+
     if not normalized:
-        return None, "planning_required", "调用 web_search 前必须先调用 plan_intent，并传入 planning_session_id。"
+        if planning_mode == "require":
+            return None, "not_provided", warnings, "planning_required", "调用 web_search 前必须先调用 plan_intent，并传入 planning_session_id。"
+        return None, "not_provided", warnings, "", ""
 
     session = planning_engine.get_session(normalized)
     if session is None:
-        return None, "planning_session_not_found", f"planning_session_id 不存在或已过期: {normalized}"
+        message = f"planning_session_id 不存在或已过期: {normalized}"
+        if planning_mode == "require":
+            return None, "ignored_invalid", warnings, "planning_session_not_found", message
+        warnings.append(message)
+        return None, "ignored_invalid", warnings, "", ""
 
     if "intent_analysis" not in session.phases:
-        return session, "planning_incomplete", "规划会话缺少 intent_analysis，必须先完成 plan_intent。"
+        message = "规划会话缺少 intent_analysis，必须先完成 plan_intent。"
+        if planning_mode == "require":
+            return None, "ignored_incomplete", warnings, "planning_incomplete", message
+        warnings.append(message)
+        return None, "ignored_incomplete", warnings, "", ""
 
     if session.complexity_level is None or "complexity_assessment" not in session.phases:
-        return session, "planning_incomplete", "规划会话缺少 complexity_assessment，必须先完成 plan_complexity。"
+        message = "规划会话缺少 complexity_assessment，必须先完成 plan_complexity。"
+        if planning_mode == "require":
+            return None, "ignored_incomplete", warnings, "planning_incomplete", message
+        warnings.append(message)
+        return None, "ignored_incomplete", warnings, "", ""
 
     missing = _missing_required_phases(session)
     if missing:
         missing_tools = [_PHASE_TO_TOOL_NAME.get(phase, phase) for phase in missing]
-        return session, "planning_incomplete", "规划阶段未完成，缺少: " + ", ".join(missing_tools)
+        message = "规划阶段未完成，缺少: " + ", ".join(missing_tools)
+        if planning_mode == "require":
+            return None, "ignored_incomplete", warnings, "planning_incomplete", message
+        warnings.append(message)
+        return None, "ignored_incomplete", warnings, "", ""
 
     plan = session.build_executable_plan()
     intent = plan.get("intent_analysis")
     if not isinstance(intent, dict) or not (intent.get("query_fingerprint") or "").strip():
-        return session, "planning_unbound", "规划会话缺少 query 绑定信息，请重新调用 plan_intent 并传入 original_query。"
+        message = "规划会话缺少 query 绑定信息，请重新调用 plan_intent 并传入 original_query。"
+        if planning_mode == "require":
+            return None, "ignored_invalid", warnings, "planning_unbound", message
+        warnings.append(message)
+        return None, "ignored_invalid", warnings, "", ""
 
     if not _planning_matches_query(session, query):
-        return session, "planning_query_mismatch", "planning_session_id 与当前 query 不匹配，请重新调用 plan_intent 生成新的规划会话。"
+        message = "planning_session_id 与当前 query 不匹配，请重新调用 plan_intent 生成新的规划会话。"
+        if planning_mode == "require":
+            return None, "ignored_mismatch", warnings, "planning_query_mismatch", message
+        warnings.append(message)
+        return None, "ignored_mismatch", warnings, "", ""
 
-    return session, "", ""
+    return _build_planning_context_data(session), "applied", warnings, "", ""
 
 
 WEB_SEARCH_DESCRIPTION = """
-Before using this tool, call `plan_intent` first to perform search planning, then pass the resulting `planning_session_id`. For level 1 queries, complete the required early planning phases before searching. For higher-complexity queries, complete the required planning flow before calling `web_search`.
+By default, you can call `web_search` directly. The server applies its own bounded search strategy and only uses planning context when you explicitly provide it.
 
 Performs a bounded multi-round web search workflow and returns a synthesized answer. It may use breadth-first exploration followed by depth-first follow-up when the query warrants it, but it must still converge instead of looping indefinitely.
+
+`search_prompt` is optional. Use it when the calling agent wants to provide its own search strategy or answer-style instructions. Internal safety guardrails and fixed-format helper prompts still remain enforced by the server.
+If omitted, the server falls back to its default bounded search strategy.
+
+Planning is optional:
+- `planning_session_id`: optional planning session from `plan_intent`
+- `planning_mode`: `auto` | `require` | `ignore`
+- In `auto`, invalid planning is ignored with warnings and the default search path continues.
+- In `require`, planning validation failures become terminal errors.
+- In `ignore`, planning is skipped entirely.
+
+Structured steering parameters are also available:
+- `source_preference`: `auto` | `official` | `community` | `news` | `academic`
+- `answer_style`: `auto` | `concise` | `detailed` | `bullet_summary`
+- `search_depth`: `auto` | `direct` | `balanced` | `deep`
+
+Example:
+{
+  "query": "latest FastAPI release notes",
+  "planning_session_id": "plan_123",
+  "planning_mode": "auto",
+  "source_preference": "official",
+  "answer_style": "bullet_summary",
+  "search_prompt": "Prefer official docs; answer in 3 bullets."
+}
 
 Returns:
 - session_id: string
@@ -394,7 +466,11 @@ Returns:
 - sources_count: int
 - status: "ok" | "error"
 - answer_ready: bool
+- used_custom_search_prompt: bool
+- planning_applied: bool
+- planning_status: string
 - sources_preview: lightweight preview of up to 3 cached sources
+- warnings: optional non-fatal warnings such as ignored invalid planning
 - error: object, only present when status is "error"
 
 Use get_sources only when the full cached source list is needed for citation or verification.
@@ -410,14 +486,24 @@ If status is "error", treat it as a terminal result for this exact query. Do not
 )
 async def web_search(
     query: Annotated[str, "Clear, self-contained natural-language search query."],
-    planning_session_id: Annotated[str, "Session ID returned by plan_intent. web_search validates this plan before execution."],
+    planning_session_id: Annotated[str, "Optional session ID returned by plan_intent. When present, web_search may apply it as reference context."] = "",
+    planning_mode: Annotated[Literal["auto", "require", "ignore"], "How to handle planning_session_id. `auto` applies valid planning and ignores invalid planning with warnings; `require` enforces valid planning; `ignore` skips planning entirely."] = "auto",
     platform: Annotated[str, "Target platform to focus on (e.g., 'Twitter', 'GitHub', 'Reddit'). Leave empty for general web search."] = "",
     model: Annotated[str, "Optional model ID for this request only. This value is used ONLY when user explicitly provided."] = "",
+    search_prompt: Annotated[str, "Optional caller-authored search strategy prompt. Use this to steer search depth, source preferences, or answer style while keeping server-side guardrails intact."] = "",
+    source_preference: Annotated[Literal["auto", "official", "community", "news", "academic"], "Structured source preference. Use `official` for first-party docs, `community` for practitioner discussion, `news` for current reporting, or `academic` for papers and benchmarks."] = "auto",
+    answer_style: Annotated[Literal["auto", "concise", "detailed", "bullet_summary"], "Structured answer style. Use `concise` for short direct answers, `detailed` for fuller explanations, or `bullet_summary` for bullet-led output."] = "auto",
+    search_depth: Annotated[Literal["auto", "direct", "balanced", "deep"], "Structured search depth. Use `direct` for minimal verification, `balanced` for limited follow-up, or `deep` for broader exploration before targeted drill-down."] = "auto",
     extra_sources: Annotated[int, "Number of additional reference results from Tavily/Firecrawl. Set 0 to disable. Default 0."] = 0,
     ctx: Context = None,
 ) -> dict:
     session_id = new_session_id()
-    planning_session, planning_error_code, planning_error_message = _validate_planning_session(planning_session_id, query)
+    has_custom_search_prompt = bool((search_prompt or "").strip())
+    planning_context, planning_status, planning_warnings, planning_error_code, planning_error_message = _resolve_planning_context(
+        planning_session_id,
+        query,
+        planning_mode,
+    )
     if planning_error_code:
         await _SOURCES_CACHE.set(session_id, [])
         return _build_web_search_response(
@@ -427,6 +513,10 @@ async def web_search(
             status="error",
             error_code=planning_error_code,
             error_message=planning_error_message,
+            used_custom_search_prompt=has_custom_search_prompt,
+            planning_applied=False,
+            planning_status=planning_status,
+            warnings=planning_warnings,
         )
 
     try:
@@ -442,6 +532,10 @@ async def web_search(
             status="error",
             error_code="config_error",
             error_message=message,
+            used_custom_search_prompt=has_custom_search_prompt,
+            planning_applied=planning_context is not None,
+            planning_status=planning_status,
+            warnings=planning_warnings,
         )
 
     effective_model = config.grok_model
@@ -457,11 +551,14 @@ async def web_search(
                 status="error",
                 error_code="invalid_model",
                 error_message=message,
+                used_custom_search_prompt=has_custom_search_prompt,
+                planning_applied=planning_context is not None,
+                planning_status=planning_status,
+                warnings=planning_warnings,
             )
         effective_model = model
 
     grok_provider = GrokSearchProvider(api_url, api_key, effective_model)
-    planning_context = _build_planning_context_data(planning_session)
 
     # 计算额外信源配额
     has_tavily = config.tavily_enabled and bool(config.tavily_api_keys)
@@ -492,7 +589,26 @@ async def web_search(
         except Exception:
             return None
 
-    coros: list = [grok_provider.search(query, platform, ctx=ctx, planning_context=planning_context)]
+    provider_kwargs = {
+        "ctx": ctx,
+        "planning_context": planning_context,
+    }
+    if search_prompt.strip():
+        provider_kwargs["search_prompt"] = search_prompt
+    if source_preference != "auto":
+        provider_kwargs["source_preference"] = source_preference
+    if answer_style != "auto":
+        provider_kwargs["answer_style"] = answer_style
+    if search_depth != "auto":
+        provider_kwargs["search_depth"] = search_depth
+
+    coros: list = [
+        grok_provider.search(
+            query,
+            platform,
+            **provider_kwargs,
+        )
+    ]
     if tavily_count > 0:
         coros.append(_safe_tavily())
     if firecrawl_count > 0:
@@ -534,6 +650,10 @@ async def web_search(
             status="error",
             error_code="upstream_search_failed",
             error_message=message,
+            used_custom_search_prompt=has_custom_search_prompt,
+            planning_applied=planning_context is not None,
+            planning_status=planning_status,
+            warnings=planning_warnings,
         )
 
     if not answer.strip():
@@ -544,9 +664,21 @@ async def web_search(
             _build_sparse_search_fallback(all_sources),
             all_sources,
             answer_ready=False,
+            used_custom_search_prompt=has_custom_search_prompt,
+            planning_applied=planning_context is not None,
+            planning_status=planning_status,
+            warnings=planning_warnings,
         )
 
-    return _build_web_search_response(session_id, answer, all_sources)
+    return _build_web_search_response(
+        session_id,
+        answer,
+        all_sources,
+        used_custom_search_prompt=has_custom_search_prompt,
+        planning_applied=planning_context is not None,
+        planning_status=planning_status,
+        warnings=planning_warnings,
+    )
 
 
 @mcp.tool(
@@ -742,98 +874,106 @@ async def web_map(
     name="get_config_info",
     output_schema=None,
     description="""
-    Returns current Grok Search MCP server configuration and tests API connectivity.
+    Returns current Grok Search MCP server configuration in a structured JSON object.
 
     **Key Features:**
-        - **Configuration Check:** Verifies environment variables and current settings.
-        - **Connection Test:** Sends request to /models endpoint to validate API access.
-        - **Model Discovery:** Lists all available models from the API.
+        - **Structured Diagnostics:** Always returns structured JSON instead of throwing, including when config snapshot gathering fails.
+        - **Optional Connection Test:** Set `include_connection_test=true` to probe the `/models` endpoint and validate API access.
+        - **Model Discovery:** When the connection test runs successfully, it lists available models from the API.
 
     **Edge Cases & Best Practices:**
         - Use this tool first when debugging connection or configuration issues.
         - API keys are automatically masked for security in the response.
-        - Connection test timeout is 10 seconds; network issues may cause delays.
+        - The connection test is skipped by default so callers can inspect configuration without incurring network latency or failures.
+        - When enabled, the connection test uses a 10-second timeout and reports failures in-band.
     """,
-    meta={"version": "1.3.0", "author": "guda.studio"},
+    meta={"version": "1.4.0", "author": "guda.studio"},
 )
-async def get_config_info() -> str:
-    import json
+async def get_config_info(
+    include_connection_test: Annotated[
+        bool,
+        "Set to true to probe the /models endpoint. Defaults to false so config inspection remains local and reliable.",
+    ] = False,
+    reason: Annotated[
+        str,
+        "Optional caller note accepted for compatibility with agent tool-calling patterns. This value is ignored by the server.",
+    ] = "",
+) -> dict:
+    import time
     import httpx
 
-    config_info = config.get_config_info()
-
-    # 添加连接测试
-    test_result = {
-        "status": "未测试",
-        "message": "",
-        "response_time_ms": 0
+    skipped_connection_test = {
+        "status": "skipped",
+        "message": "Connection test not run. Pass include_connection_test=true to probe the API.",
+        "response_time_ms": None,
+        "available_models": [],
     }
+    result: dict = {
+        "status": "ok",
+        "config": {},
+        "config_status": "Configuration snapshot not collected.",
+        "connection_test": dict(skipped_connection_test),
+    }
+
+    try:
+        config_snapshot = config.get_config_info()
+        result["config"] = config_snapshot
+        result.update(config_snapshot)
+    except Exception as e:
+        result["status"] = "error"
+        result["config_status"] = f"❌ Failed to gather configuration snapshot: {str(e)}"
+        result["error"] = {
+            "code": "config_snapshot_failed",
+            "message": f"Failed to gather configuration snapshot: {str(e)}",
+        }
+
+    if not include_connection_test:
+        return result
 
     try:
         api_url = config.grok_api_url
         api_key = config.grok_api_key
 
-        # 构建 /models 端点 URL
-        models_url = f"{api_url.rstrip('/')}/models"
+        start_time = time.perf_counter()
+        available_models = await _fetch_available_models(api_url, api_key)
+        response_time_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
-        # 发送测试请求
-        import time
-        start_time = time.time()
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                models_url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                }
-            )
-
-            response_time = (time.time() - start_time) * 1000  # 转换为毫秒
-
-            if response.status_code == 200:
-                test_result["status"] = "✅ 连接成功"
-                test_result["message"] = f"成功获取模型列表 (HTTP {response.status_code})"
-                test_result["response_time_ms"] = round(response_time, 2)
-
-                # 尝试解析返回的模型列表
-                try:
-                    models_data = response.json()
-                    if "data" in models_data and isinstance(models_data["data"], list):
-                        model_count = len(models_data["data"])
-                        test_result["message"] += f"，共 {model_count} 个模型"
-
-                        # 提取所有模型的 ID/名称
-                        model_names = []
-                        for model in models_data["data"]:
-                            if isinstance(model, dict) and "id" in model:
-                                model_names.append(model["id"])
-
-                        if model_names:
-                            test_result["available_models"] = model_names
-                except:
-                    pass
-            else:
-                test_result["status"] = "⚠️ 连接异常"
-                test_result["message"] = f"HTTP {response.status_code}: {response.text[:100]}"
-                test_result["response_time_ms"] = round(response_time, 2)
-
+        result["connection_test"] = {
+            "status": "ok",
+            "message": "Connection test succeeded.",
+            "response_time_ms": response_time_ms,
+            "available_models": available_models,
+        }
     except httpx.TimeoutException:
-        test_result["status"] = "❌ 连接超时"
-        test_result["message"] = "请求超时（10秒），请检查网络连接或 API URL"
+        result["connection_test"] = {
+            "status": "error",
+            "message": "Connection test timed out after 10 seconds.",
+            "response_time_ms": None,
+            "available_models": [],
+        }
     except httpx.RequestError as e:
-        test_result["status"] = "❌ 连接失败"
-        test_result["message"] = f"网络错误: {str(e)}"
+        result["connection_test"] = {
+            "status": "error",
+            "message": f"Connection test failed: {str(e)}",
+            "response_time_ms": None,
+            "available_models": [],
+        }
     except ValueError as e:
-        test_result["status"] = "❌ 配置错误"
-        test_result["message"] = str(e)
+        result["connection_test"] = {
+            "status": "error",
+            "message": f"Connection test could not start: {str(e)}",
+            "response_time_ms": None,
+            "available_models": [],
+        }
     except Exception as e:
-        test_result["status"] = "❌ 测试失败"
-        test_result["message"] = f"未知错误: {str(e)}"
+        result["connection_test"] = {
+            "status": "error",
+            "message": f"Connection test failed unexpectedly: {str(e)}",
+            "response_time_ms": None,
+            "available_models": [],
+        }
 
-    config_info["connection_test"] = test_result
-
-    return json.dumps(config_info, ensure_ascii=False, indent=2)
+    return result
 
 
 @mcp.tool(
