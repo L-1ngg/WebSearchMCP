@@ -24,25 +24,58 @@ class Config:
             cls._instance._env_file_cache = None
         return cls._instance
 
+    def _config_dirs(self) -> tuple[Path, Path]:
+        return Path.home() / ".config" / "web-search", Path.cwd() / ".web-search"
+
+    @staticmethod
+    def _path_exists(path: Path) -> bool:
+        try:
+            return path.exists()
+        except OSError:
+            return False
+
+    @staticmethod
+    def _path_is_file(path: Path) -> bool:
+        try:
+            return path.is_file()
+        except OSError:
+            return False
+
+    def _resolve_config_file(self, *, create_dirs: bool) -> Path:
+        home_dir, cwd_dir = self._config_dirs()
+        home_config_file = home_dir / "config.json"
+        cwd_config_file = cwd_dir / "config.json"
+
+        if create_dirs:
+            if self._config_file is None:
+                try:
+                    home_dir.mkdir(parents=True, exist_ok=True)
+                    self._config_file = home_config_file
+                except OSError:
+                    cwd_dir.mkdir(parents=True, exist_ok=True)
+                    self._config_file = cwd_config_file
+            return self._config_file
+
+        if self._config_file is not None:
+            return self._config_file
+        if self._path_exists(home_config_file):
+            return home_config_file
+        if self._path_exists(cwd_config_file):
+            return cwd_config_file
+        return home_config_file
+
     @property
     def config_file(self) -> Path:
-        if self._config_file is None:
-            config_dir = Path.home() / ".config" / "web-search"
-            try:
-                config_dir.mkdir(parents=True, exist_ok=True)
-            except OSError:
-                config_dir = Path.cwd() / ".web-search"
-                config_dir.mkdir(parents=True, exist_ok=True)
-            self._config_file = config_dir / "config.json"
-        return self._config_file
+        return self._resolve_config_file(create_dirs=True)
 
     def _load_config_file(self) -> dict:
-        if not self.config_file.exists():
+        config_file = self._resolve_config_file(create_dirs=False)
+        if not self._path_exists(config_file):
             return {}
         try:
-            with open(self.config_file, "r", encoding="utf-8") as file:
+            with open(config_file, "r", encoding="utf-8") as file:
                 return json.load(file)
-        except (json.JSONDecodeError, IOError):
+        except (json.JSONDecodeError, OSError):
             return {}
 
     def _save_config_file(self, config_data: dict) -> None:
@@ -53,7 +86,10 @@ class Config:
             raise ValueError(f"无法保存配置文件: {str(exc)}")
 
     def _iter_env_files(self) -> list[Path]:
-        candidates: list[Path] = [self.config_file.parent / ".env", Path.cwd() / ".env"]
+        candidates: list[Path] = [
+            self._resolve_config_file(create_dirs=False).parent / ".env",
+            Path.cwd() / ".env",
+        ]
         # 支持新旧两种环境变量名，保持向后兼容
         explicit = os.getenv("WEB_SEARCH_ENV_FILE") or os.getenv(
             "GROK_SEARCH_ENV_FILE", ""
@@ -74,7 +110,7 @@ class Config:
 
     @staticmethod
     def _parse_env_file(path: Path) -> dict[str, str]:
-        if not path.exists() or not path.is_file():
+        if not Config._path_exists(path) or not Config._path_is_file(path):
             return {}
 
         env_data: dict[str, str] = {}
@@ -246,27 +282,37 @@ class Config:
 
     @property
     def log_dir(self) -> Path:
+        return self._resolve_log_dir(create_dirs=True)
+
+    def _resolve_log_dir(self, *, create_dirs: bool) -> Path:
         log_dir_str = self._get_setting("GROK_LOG_DIR", "logs") or "logs"
         log_dir = Path(log_dir_str)
         if log_dir.is_absolute():
             return log_dir
 
         home_log_dir = Path.home() / ".config" / "web-search" / log_dir_str
-        try:
-            home_log_dir.mkdir(parents=True, exist_ok=True)
+        if not create_dirs and self._path_exists(home_log_dir):
             return home_log_dir
-        except OSError:
-            pass
+        if create_dirs:
+            try:
+                home_log_dir.mkdir(parents=True, exist_ok=True)
+                return home_log_dir
+            except OSError:
+                pass
 
         cwd_log_dir = Path.cwd() / log_dir_str
-        try:
-            cwd_log_dir.mkdir(parents=True, exist_ok=True)
+        if not create_dirs and self._path_exists(cwd_log_dir):
             return cwd_log_dir
-        except OSError:
-            pass
+        if create_dirs:
+            try:
+                cwd_log_dir.mkdir(parents=True, exist_ok=True)
+                return cwd_log_dir
+            except OSError:
+                pass
 
         tmp_log_dir = Path(tempfile.gettempdir()) / "web-search" / log_dir_str
-        tmp_log_dir.mkdir(parents=True, exist_ok=True)
+        if create_dirs:
+            tmp_log_dir.mkdir(parents=True, exist_ok=True)
         return tmp_log_dir
 
     def _apply_model_suffix(self, model: str) -> str:
@@ -315,7 +361,7 @@ class Config:
             config_status = f"❌ 配置错误: {str(exc)}"
 
         tavily_keys = self.tavily_api_keys
-        env_files = [str(path) for path in self._iter_env_files() if path.exists()]
+        env_files = [str(path) for path in self._iter_env_files() if self._path_exists(path)]
 
         return {
             "GROK_API_URL": api_url,
@@ -323,7 +369,7 @@ class Config:
             "GROK_MODEL": self.grok_model,
             "GROK_DEBUG": self.debug_enabled,
             "GROK_LOG_LEVEL": self.log_level,
-            "GROK_LOG_DIR": str(self.log_dir),
+            "GROK_LOG_DIR": str(self._resolve_log_dir(create_dirs=False)),
             "TAVILY_API_URL": self.tavily_api_url,
             "TAVILY_ENABLED": self.tavily_enabled,
             "TAVILY_API_KEY": self._mask_api_key(tavily_keys[0])
