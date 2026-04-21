@@ -181,8 +181,19 @@ This will automatically modify the **project-level** `.claude/settings.json` `pe
 
 ## 3. MCP Tools
 
+### Stable Core Tools (Phase 1)
+
+To reduce migration churn, Phase 1 introduces stable core tool names: `search`, `fetch`, `map`, and `doctor`. In this phase they are non-breaking entry points and the legacy tool names still work; new integrations should migrate to the stable names first.
+
+| Legacy Tool | Stable Core Tool | Notes |
+|-------------|------------------|-------|
+| `web_search` | `search` | Thin wrapper alias with matching arguments and response behavior |
+| `web_fetch` | `fetch` | Stable fetch entry point with structured output |
+| `web_map` | `map` | Stable site-map entry point with structured output |
+| `get_config_info` | `doctor` | Stable diagnostic entry point; `get_config_info` remains available for the detailed config snapshot |
+
 <details>
-<summary>This project provides eight MCP tools (click to expand)</summary>
+<summary>This project provides the following MCP tools (click to expand)</summary>
 
 ### `web_search` — AI Web Search
 
@@ -256,15 +267,20 @@ Execution constraints:
 
 ### `get_sources` — Retrieve Sources
 
-Retrieves the full cached source list for a previous `web_search` call, typically for verification or citations.
+Retrieves cached sources for a previous `web_search` call, typically for verification or citations. By default it returns the full list; if `limit > 0`, it returns a page plus `next_cursor` metadata for follow-up calls.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `session_id` | string | Yes | `session_id` returned by `web_search` |
+| `limit` | int | No | Optional page size. Omit it or pass `0` to keep the legacy full-list behavior |
+| `cursor` | string | No | Optional pagination cursor returned by a previous `get_sources` call |
 
 Return value (structured dict):
 - `session_id`
 - `sources_count`
+- `returned_count`
+- `next_cursor`
+- `has_more`
 - `sources`: source list (each item includes `url`, may include `title`/`description`/`provider`)
 
 ### `web_fetch` — Web Content Extraction

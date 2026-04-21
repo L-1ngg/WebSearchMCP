@@ -198,8 +198,25 @@ claude mcp list
 
 ## 三、MCP 工具介绍
 
+### Stable Core Tools (Phase 1)
+
+为降低后续兼容成本，Phase 1 引入稳定核心工具名：`search`、`fetch`、`map`、`doctor`。当前阶段这些名称都是非破坏性入口，旧工具名仍然可用；新接入方建议优先迁移到这组稳定名称。
+
+| 旧工具名 | Stable Core Tool | 说明 |
+|------|------|------|
+| `web_search` | `search` | 薄包装别名，参数与返回行为保持一致 |
+| `web_fetch` | `fetch` | 稳定抓取入口，返回结构化结果 |
+| `web_map` | `map` | 稳定站点映射入口，返回结构化结果 |
+| `get_config_info` | `doctor` | 稳定诊断入口；`get_config_info` 仍可用于更详细的配置快照 |
+
+### Phase 1 Release Notes
+
+- 新增稳定核心工具名 `search`、`fetch`、`map`、`doctor`，旧工具名在 Phase 1 继续保留。
+- `get_sources` 新增可选分页契约：传 `limit` 与 `cursor` 可按页拉取；省略 `limit` 或传 `0` 时继续保持旧的“返回全部信源”行为。
+- `get_config_info` 默认不主动联网；如需模型列表，可显式传 `include_connection_test=true`。
+
 <details>
-<summary>本项目提供八个 MCP 工具（展开查看）</summary>
+<summary>本项目提供以下 MCP 工具（展开查看）</summary>
 
 ### `web_search` — AI 网络搜索
 
@@ -274,16 +291,21 @@ claude mcp list
 
 ### `get_sources` — 获取信源
 
-通过 `session_id` 获取对应 `web_search` 的全部缓存信源，用于校验或补充引用。
+通过 `session_id` 获取对应 `web_search` 的缓存信源，用于校验或补充引用。默认返回全部列表；若传入 `limit > 0`，则按页返回并附带 `next_cursor` 供继续拉取。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `session_id` | string | ✅ | `web_search` 返回的 `session_id` |
+| `limit` | int | ❌ | 可选分页大小；省略或传 `0` 时保持旧行为，返回全部缓存信源 |
+| `cursor` | string | ❌ | 可选分页游标，填入上一次返回的 `next_cursor` |
 
 返回值（结构化字典）：
 
 - `session_id`
 - `sources_count`
+- `returned_count`
+- `next_cursor`
+- `has_more`
 - `sources`: 信源列表（每项包含 `url`，可能包含 `title`/`description`/`provider`）
 
 ### `web_fetch` — 网页内容抓取

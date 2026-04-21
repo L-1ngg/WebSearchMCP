@@ -50,6 +50,48 @@ class SourcesCache:
             self._cache.move_to_end(session_id)
             return sources
 
+    async def page(self, session_id: str, limit: int = 0, cursor: str = "") -> dict[str, Any] | None:
+        async with self._lock:
+            sources = self._cache.get(session_id)
+            if sources is None:
+                return None
+
+            self._cache.move_to_end(session_id)
+
+            total_count = len(sources)
+            page_limit = _normalize_page_limit(limit)
+            if page_limit <= 0:
+                return {
+                    "sources": sources,
+                    "sources_count": total_count,
+                    "next_cursor": "",
+                    "has_more": False,
+                }
+
+            start = _parse_page_cursor(cursor)
+            end = start + page_limit
+            has_more = end < total_count
+            return {
+                "sources": sources[start:end],
+                "sources_count": total_count,
+                "next_cursor": str(end) if has_more else "",
+                "has_more": has_more,
+            }
+
+
+def _normalize_page_limit(limit: int) -> int:
+    try:
+        return int(limit)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_page_cursor(cursor: str) -> int:
+    try:
+        return max(int((cursor or "").strip()), 0)
+    except ValueError:
+        return 0
+
 
 def merge_sources(*source_lists: list[dict]) -> list[dict]:
     seen: set[str] = set()

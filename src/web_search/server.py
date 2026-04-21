@@ -1,6 +1,7 @@
 import re
 import sys
 import unicodedata
+from contextvars import ContextVar
 from hashlib import sha256
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from pydantic import Field
 
 # 尝试使用绝对导入（支持 mcp run）
 try:
+    from web_search import diagnostics
     from web_search.providers.grok import GrokSearchProvider
     from web_search.providers.tavily import TavilyClient
     from web_search.logger import log_info
@@ -22,6 +24,7 @@ try:
     from web_search.sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
     from web_search.planning import PHASE_NAMES, PlanningSession, engine as planning_engine, _split_csv
 except ImportError:
+    from . import diagnostics
     from .providers.grok import GrokSearchProvider
     from .providers.tavily import TavilyClient
     from .logger import log_info
@@ -38,6 +41,7 @@ _AVAILABLE_MODELS_CACHE: dict[tuple[str, str], list[str]] = {}
 _AVAILABLE_MODELS_LOCK = asyncio.Lock()
 _TAVILY_CLIENT: TavilyClient | None = None
 _TAVILY_CLIENT_FINGERPRINT: tuple[str, tuple[str, ...], int] | None = None
+_FETCH_STATUS: ContextVar[str] = ContextVar("web_search_fetch_status", default="unknown")
 _PHASE_TO_TOOL_NAME = {
     "intent_analysis": "plan_intent",
     "complexity_assessment": "plan_complexity",
@@ -68,25 +72,7 @@ def _get_tavily_client() -> TavilyClient:
 
 
 async def _fetch_available_models(api_url: str, api_key: str) -> list[str]:
-    import httpx
-
-    models_url = f"{api_url.rstrip('/')}/models"
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get(
-            models_url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-
-    models: list[str] = []
-    for item in (data or {}).get("data", []) or []:
-        if isinstance(item, dict) and isinstance(item.get("id"), str):
-            models.append(item["id"])
-    return models
+    return await diagnostics.fetch_available_models(api_url, api_key)
 
 
 async def _get_available_models_cached(api_url: str, api_key: str) -> list[str]:
@@ -208,6 +194,20 @@ def _build_web_search_response(
             "retry_same_query": retry_same_query,
         }
 
+    return response
+
+
+def _build_get_sources_response(session_id: str, page: dict, error: str = "") -> dict:
+    response = {
+        "session_id": session_id,
+        "sources": page["sources"],
+        "sources_count": page["sources_count"],
+        "returned_count": len(page["sources"]),
+        "next_cursor": page["next_cursor"],
+        "has_more": page["has_more"],
+    }
+    if error:
+        response["error"] = error
     return response
 
 
@@ -682,25 +682,69 @@ async def web_search(
 
 
 @mcp.tool(
+    name="search",
+    output_schema=None,
+    description="""
+    Stable core-tool alias for `web_search`.
+    This is a thin non-breaking wrapper that forwards all arguments to `web_search`.
+    """,
+    meta={"version": "1.4.0", "author": "guda.studio"},
+)
+async def search(
+    query: Annotated[str, "Clear, self-contained natural-language search query."],
+    planning_session_id: Annotated[str, "Optional session ID returned by plan_intent. When present, web_search may apply it as reference context."] = "",
+    planning_mode: Annotated[Literal["auto", "require", "ignore"], "How to handle planning_session_id. `auto` applies valid planning and ignores invalid planning with warnings; `require` enforces valid planning; `ignore` skips planning entirely."] = "auto",
+    platform: Annotated[str, "Target platform to focus on (e.g., 'Twitter', 'GitHub', 'Reddit'). Leave empty for general web search."] = "",
+    model: Annotated[str, "Optional model ID for this request only. This value is used ONLY when user explicitly provided."] = "",
+    search_prompt: Annotated[str, "Optional caller-authored search strategy prompt. Use this to steer search depth, source preferences, or answer style while keeping server-side guardrails intact."] = "",
+    source_preference: Annotated[Literal["auto", "official", "community", "news", "academic"], "Structured source preference. Use `official` for first-party docs, `community` for practitioner discussion, `news` for current reporting, or `academic` for papers and benchmarks."] = "auto",
+    answer_style: Annotated[Literal["auto", "concise", "detailed", "bullet_summary"], "Structured answer style. Use `concise` for short direct answers, `detailed` for fuller explanations, or `bullet_summary` for bullet-led output."] = "auto",
+    search_depth: Annotated[Literal["auto", "direct", "balanced", "deep"], "Structured search depth. Use `direct` for minimal verification, `balanced` for limited follow-up, or `deep` for broader exploration before targeted drill-down."] = "auto",
+    extra_sources: Annotated[int, "Number of additional reference results from Tavily/Firecrawl. Set 0 to disable. Default 0."] = 0,
+    ctx: Context = None,
+) -> dict:
+    return await web_search(
+        query=query,
+        planning_session_id=planning_session_id,
+        planning_mode=planning_mode,
+        platform=platform,
+        model=model,
+        search_prompt=search_prompt,
+        source_preference=source_preference,
+        answer_style=answer_style,
+        search_depth=search_depth,
+        extra_sources=extra_sources,
+        ctx=ctx,
+    )
+
+
+@mcp.tool(
     name="get_sources",
     description="""
-    Retrieve the full cached source list for a previous web_search call.
-    Provide the session_id returned by web_search to fetch all cached sources for verification or citation.
+    Retrieve cached sources for a previous web_search call.
+    Provide the session_id returned by web_search. If limit is omitted or 0, returns the full cached list.
+    If limit is greater than 0, returns a paginated slice and next_cursor metadata for follow-up calls.
     """,
     meta={"version": "1.0.0", "author": "guda.studio"},
 )
 async def get_sources(
-    session_id: Annotated[str, "Session ID from previous web_search call."]
+    session_id: Annotated[str, "Session ID from previous web_search call."],
+    limit: Annotated[int, "Optional page size. Use 0 or omit it to keep the legacy full-list behavior."] = 0,
+    cursor: Annotated[str, "Optional pagination cursor returned by a previous get_sources call."] = "",
 ) -> dict:
-    sources = await _SOURCES_CACHE.get(session_id)
-    if sources is None:
-        return {
-            "session_id": session_id,
-            "sources": [],
-            "sources_count": 0,
-            "error": "session_id_not_found_or_expired",
-        }
-    return {"session_id": session_id, "sources": sources, "sources_count": len(sources)}
+    page = await _SOURCES_CACHE.page(session_id, limit=limit, cursor=cursor)
+    if page is None:
+        return _build_get_sources_response(
+            session_id,
+            {
+                "sources": [],
+                "sources_count": 0,
+                "next_cursor": "",
+                "has_more": False,
+            },
+            error="session_id_not_found_or_expired",
+        )
+    return _build_get_sources_response(session_id, page)
 
 
 async def _call_tavily_extract(url: str) -> str | None:
@@ -802,43 +846,129 @@ async def web_fetch(
 
     result = await _call_tavily_extract(url)
     if result:
+        _FETCH_STATUS.set("ok")
         await log_info(ctx, "Fetch Finished (Tavily)!", config.debug_enabled)
         return result
 
     await log_info(ctx, "Tavily unavailable or failed, trying Firecrawl...", config.debug_enabled)
     result = await _call_firecrawl_scrape(url, ctx)
     if result:
+        _FETCH_STATUS.set("ok")
         await log_info(ctx, "Fetch Finished (Firecrawl)!", config.debug_enabled)
         return result
 
     await log_info(ctx, "Fetch Failed!", config.debug_enabled)
     if not config.tavily_api_keys and not config.firecrawl_api_key:
+        _FETCH_STATUS.set("error")
         return "配置错误: TAVILY_API_KEY / TAVILY_API_KEYS 和 FIRECRAWL_API_KEY 均未配置"
+    _FETCH_STATUS.set("error")
     return "提取失败: 所有提取服务均未能获取内容"
 
 
-async def _call_tavily_map(url: str, instructions: str = None, max_depth: int = 1,
-                           max_breadth: int = 20, limit: int = 50, timeout: int = 150) -> str:
+def _truncate_content(content: str, max_chars: int) -> dict[str, object]:
+    normalized_content = content or ""
+    content_length = len(normalized_content)
+    returned_content = normalized_content[:max_chars]
+
+    return {
+        "content": returned_content,
+        "truncated": content_length > max_chars,
+        "content_length": content_length,
+        "returned_length": len(returned_content),
+        "max_chars": max_chars,
+    }
+
+
+@mcp.tool(
+    name="fetch",
+    output_schema=None,
+    description="""
+    Compatibility alias for `web_fetch` that returns a structured object with bounded output.
+
+    Returns:
+    - status: `ok` when content is returned, otherwise `error`
+    - url: the requested URL
+    - content: extracted content truncated to `max_chars`
+    - truncated: whether the output was shortened
+    - content_length: original content length
+    - returned_length: length after truncation
+    - max_chars: requested response bound
+    """,
+    meta={"version": "1.4.0", "author": "guda.studio"},
+)
+async def fetch(
+    url: Annotated[str, "Valid HTTP/HTTPS web address pointing to the target page. Must be complete and accessible."],
+    max_chars: Annotated[int, Field(description="Maximum number of characters to return from the fetched content.", ge=1)] = 12000,
+    ctx: Context = None,
+) -> dict:
+    token = _FETCH_STATUS.set("unknown")
+    try:
+        content = await web_fetch(url, ctx)
+        status = _FETCH_STATUS.get()
+    finally:
+        _FETCH_STATUS.reset(token)
+
+    payload = _truncate_content(content, max_chars)
+
+    if status == "unknown":
+        status = "ok" if content else "error"
+
+    return {
+        "status": status,
+        "url": url,
+        **payload,
+    }
+
+
+def _build_tavily_map_payload(data: dict) -> dict:
+    return {
+        "base_url": data.get("base_url", ""),
+        "results": data.get("results", []),
+        "response_time": data.get("response_time", 0),
+    }
+
+
+async def _call_tavily_map_structured(
+    url: str,
+    instructions: str = None,
+    max_depth: int = 1,
+    max_breadth: int = 20,
+    limit: int = 50,
+    timeout: int = 150,
+) -> dict:
     import httpx
-    import json
+
     client = _get_tavily_client()
     if not client.is_configured:
-        return "配置错误: TAVILY_API_KEY / TAVILY_API_KEYS 未配置，请设置环境变量或本地 .env"
+        return {"error": "配置错误: TAVILY_API_KEY / TAVILY_API_KEYS 未配置，请设置环境变量或本地 .env"}
     try:
         data = await client.map(url, instructions or "", max_depth, max_breadth, limit, timeout)
         if not data:
-            return "映射失败: Tavily 未返回可用结果"
-        return json.dumps({
-            "base_url": data.get("base_url", ""),
-            "results": data.get("results", []),
-            "response_time": data.get("response_time", 0)
-        }, ensure_ascii=False, indent=2)
+            return {"error": "映射失败: Tavily 未返回可用结果"}
+        return _build_tavily_map_payload(data)
     except httpx.TimeoutException:
-        return f"映射超时: 请求超过{timeout}秒"
+        return {"error": f"映射超时: 请求超过{timeout}秒"}
     except httpx.HTTPStatusError as e:
-        return f"HTTP错误: {e.response.status_code} - {e.response.text[:200]}"
+        return {"error": f"HTTP错误: {e.response.status_code} - {e.response.text[:200]}"}
     except Exception as e:
-        return f"映射错误: {str(e)}"
+        return {"error": f"映射错误: {str(e)}"}
+
+
+async def _call_tavily_map(
+    url: str,
+    instructions: str = None,
+    max_depth: int = 1,
+    max_breadth: int = 20,
+    limit: int = 50,
+    timeout: int = 150,
+) -> str:
+    import json
+
+    payload = await _call_tavily_map_structured(url, instructions, max_depth, max_breadth, limit, timeout)
+    if "error" in payload:
+        return payload["error"]
+
+    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 @mcp.tool(
@@ -868,6 +998,42 @@ async def web_map(
 ) -> str:
     result = await _call_tavily_map(url, instructions, max_depth, max_breadth, limit, timeout)
     return result
+
+
+@mcp.tool(
+    name="map",
+    output_schema=None,
+    description="""
+    Compatibility alias for `web_map` that returns a structured payload instead of a JSON string.
+    """,
+    meta={"version": "1.4.0", "author": "guda.studio"},
+)
+async def map(
+    url: Annotated[str, "Root URL to begin the mapping (e.g., 'https://docs.example.com')."],
+    instructions: Annotated[str, "Natural language instructions for the crawler to filter or focus on specific content."] = "",
+    max_depth: Annotated[int, Field(description="Maximum depth of mapping from the base URL.", ge=1, le=5)] = 1,
+    max_breadth: Annotated[int, Field(description="Maximum number of links to follow per page.", ge=1, le=500)] = 20,
+    limit: Annotated[int, Field(description="Total number of links to process before stopping.", ge=1, le=500)] = 50,
+    timeout: Annotated[int, Field(description="Maximum time in seconds for the operation.", ge=10, le=150)] = 150,
+) -> dict:
+    return await _call_tavily_map_structured(url, instructions, max_depth, max_breadth, limit, timeout)
+
+
+@mcp.tool(
+    name="doctor",
+    output_schema=None,
+    description="""
+    Runs a compact configuration and connectivity diagnostic for the web-search MCP server.
+
+    Returns:
+    - configuration: boolean flags describing whether key settings are present
+    - connection_test: Grok API connectivity status without exposing the model list
+    - recommended_next_step: one actionable follow-up based on the diagnostic result
+    """,
+    meta={"version": "1.0.0", "author": "guda.studio"},
+)
+async def doctor() -> dict:
+    return await diagnostics.get_doctor_info()
 
 
 @mcp.tool(
