@@ -1,6 +1,7 @@
 import pytest
 
 from web_search import server
+from web_search.sources import build_get_sources_response
 
 
 def _build_sources(count: int) -> list[dict]:
@@ -12,6 +13,29 @@ def _build_sources(count: int) -> list[dict]:
         }
         for index in range(count)
     ]
+
+
+def test_build_get_sources_response_adds_metadata_and_optional_error():
+    response = build_get_sources_response(
+        "demo-session",
+        {
+            "sources": [{"url": "https://example.com"}],
+            "sources_count": 1,
+            "next_cursor": "",
+            "has_more": False,
+        },
+        error="session_id_not_found_or_expired",
+    )
+
+    assert response == {
+        "session_id": "demo-session",
+        "sources": [{"url": "https://example.com"}],
+        "sources_count": 1,
+        "returned_count": 1,
+        "next_cursor": "",
+        "has_more": False,
+        "error": "session_id_not_found_or_expired",
+    }
 
 
 @pytest.mark.asyncio

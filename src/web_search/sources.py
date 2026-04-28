@@ -93,6 +93,20 @@ def _parse_page_cursor(cursor: str) -> int:
         return 0
 
 
+def build_get_sources_response(session_id: str, page: dict, error: str = "") -> dict:
+    response = {
+        "session_id": session_id,
+        "sources": page["sources"],
+        "sources_count": page["sources_count"],
+        "returned_count": len(page["sources"]),
+        "next_cursor": page["next_cursor"],
+        "has_more": page["has_more"],
+    }
+    if error:
+        response["error"] = error
+    return response
+
+
 def merge_sources(*source_lists: list[dict]) -> list[dict]:
     seen: set[str] = set()
     merged: list[dict] = []

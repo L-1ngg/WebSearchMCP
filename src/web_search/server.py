@@ -16,7 +16,7 @@ try:
     from web_search.providers.grok import GrokSearchProvider
     from web_search.logger import log_info
     from web_search.config import config
-    from web_search.sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
+    from web_search.sources import SourcesCache, build_get_sources_response, merge_sources, new_session_id, split_answer_and_sources
     from web_search.planning import engine as planning_engine, _split_csv
     from web_search.planning_adapter import (
         _build_planning_context_data,
@@ -45,7 +45,7 @@ except ImportError:
     from .providers.grok import GrokSearchProvider
     from .logger import log_info
     from .config import config
-    from .sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
+    from .sources import SourcesCache, build_get_sources_response, merge_sources, new_session_id, split_answer_and_sources
     from .planning import engine as planning_engine, _split_csv
     from .planning_adapter import (
         _build_planning_context_data,
@@ -202,20 +202,6 @@ def _build_web_search_response(
             "retry_same_query": retry_same_query,
         }
 
-    return response
-
-
-def _build_get_sources_response(session_id: str, page: dict, error: str = "") -> dict:
-    response = {
-        "session_id": session_id,
-        "sources": page["sources"],
-        "sources_count": page["sources_count"],
-        "returned_count": len(page["sources"]),
-        "next_cursor": page["next_cursor"],
-        "has_more": page["has_more"],
-    }
-    if error:
-        response["error"] = error
     return response
 
 
@@ -550,7 +536,7 @@ async def get_sources(
 ) -> dict:
     page = await _SOURCES_CACHE.page(session_id, limit=limit, cursor=cursor)
     if page is None:
-        return _build_get_sources_response(
+        return build_get_sources_response(
             session_id,
             {
                 "sources": [],
@@ -560,7 +546,7 @@ async def get_sources(
             },
             error="session_id_not_found_or_expired",
         )
-    return _build_get_sources_response(session_id, page)
+    return build_get_sources_response(session_id, page)
 
 
 @mcp.tool(
