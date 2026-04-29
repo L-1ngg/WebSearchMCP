@@ -35,6 +35,7 @@ try:
         _call_firecrawl_scrape,
         _call_firecrawl_search,
         _call_tavily_extract,
+        _call_tavily_map,
         _call_tavily_map_structured,
         _call_tavily_search,
         _get_tavily_client,
@@ -64,6 +65,7 @@ except ImportError:
         _call_firecrawl_scrape,
         _call_firecrawl_search,
         _call_tavily_extract,
+        _call_tavily_map,
         _call_tavily_map_structured,
         _call_tavily_search,
         _get_tavily_client,
@@ -635,23 +637,6 @@ async def fetch(
     }
 
 
-async def _call_tavily_map(
-    url: str,
-    instructions: str = None,
-    max_depth: int = 1,
-    max_breadth: int = 20,
-    limit: int = 50,
-    timeout: int = 150,
-) -> str:
-    import json
-
-    payload = await _call_tavily_map_structured(url, instructions, max_depth, max_breadth, limit, timeout)
-    if "error" in payload:
-        return payload["error"]
-
-    return json.dumps(payload, ensure_ascii=False, indent=2)
-
-
 @mcp.tool(
     name="web_map",
     description="""
@@ -677,8 +662,13 @@ async def web_map(
     limit: Annotated[int, Field(description="Total number of links to process before stopping.", ge=1, le=500)] = 50,
     timeout: Annotated[int, Field(description="Maximum time in seconds for the operation.", ge=10, le=150)] = 150
 ) -> str:
-    result = await _call_tavily_map(url, instructions, max_depth, max_breadth, limit, timeout)
-    return result
+    import json
+
+    payload = await _call_tavily_map_structured(url, instructions, max_depth, max_breadth, limit, timeout)
+    if "error" in payload:
+        return payload["error"]
+
+    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 @mcp.tool(

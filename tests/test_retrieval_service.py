@@ -1,4 +1,4 @@
-from web_search import retrieval_service
+from web_search import retrieval_service, server
 
 
 def test_fetch_status_contextvar_defaults_to_unknown():
@@ -29,3 +29,7 @@ def test_build_tavily_map_payload_preserves_expected_keys():
         "results": [{"url": "https://docs.example.com/intro"}],
         "response_time": 0.42,
     }
+
+
+def test_server_reexports_tavily_map_helper_from_retrieval_service():
+    assert server._call_tavily_map is retrieval_service._call_tavily_map
